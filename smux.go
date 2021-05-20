@@ -10,7 +10,6 @@ var (
 	ErrTimeout    = errors.New("timeout")
 	ErrClosedPipe = errors.New("read/write on closed pipe")
 	ErrBrokenPipe = errors.New("broken pipe")
-	ErrEOF        = errors.New("EOF")
 )
 
 const (
@@ -32,8 +31,6 @@ func GetCode(code byte) error {
 		return ErrClosedPipe
 	case err_broken_pipe:
 		return ErrBrokenPipe
-	case err_eof:
-		return ErrEOF
 	default:
 		return nil
 	}

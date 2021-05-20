@@ -8,7 +8,7 @@ const (
 	cmdSYN byte = iota // stream open
 	cmdFIN             // stream close, a.k.a EOF mark
 	cmdPSH             // data push
-	cmdRSH             // restart data push
+	cmdUPW             // update window size
 )
 
 // cmd 高1位 为请求回复标记位，0请求1回复
@@ -18,8 +18,8 @@ const (
 /*
 	cmdSYN : cmd + sid + win
 	cmdFIN : cmd + sid + win
-	cmdPSH : cmd + sid + win + len（发送时表示携带数据长度，回复时表示已接受数据长度） + data
-	cmdRSH : cmd + sid + win
+	cmdPSH : cmd + sid + len + data
+	cmdUPW : cmd + sid + win
 */
 
 const (
@@ -29,20 +29,12 @@ const (
 	headerSize = sizeOfCmd + sizeOfSid + sizeOfLen
 )
 
-func newCmd(cmd, code byte, resp bool) byte {
-	cmd = cmd | code<<4
-	if resp {
-		return cmd | 0x80
-	}
-	return cmd
-}
-
 const frameSize = 65535
 
 type header [headerSize]byte
 
-func (h header) Cmd() (byte, byte, bool) {
-	return h[0] & 0xF, (h[0] & 0x70) >> 4, h[0]&0x80 > 0
+func (h header) Cmd() byte {
+	return h[0]
 }
 
 func (h header) StreamID() uint32 {

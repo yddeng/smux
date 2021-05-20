@@ -1,6 +1,7 @@
 package smux
 
 import (
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -132,8 +133,9 @@ func (s *Session) readLoop() {
 	for {
 		// read header first
 		if _, err := io.ReadFull(s.conn, hdr[:]); err == nil {
+			cmd := hdr.Cmd()
 			sid := hdr.StreamID()
-			cmd, code, resp := hdr.Cmd()
+			length := hdr.Length()
 			switch cmd {
 			case cmdSYN:
 				s.streamLock.Lock()
@@ -153,37 +155,24 @@ func (s *Session) readLoop() {
 				}
 				s.streamLock.Unlock()
 			case cmdPSH:
-				plen := hdr.Length()
-				if !resp {
-					if plen > 0 {
-						if _, err := io.ReadFull(s.conn, buffer[:plen]); err == nil {
-							s.streamLock.Lock()
-							if stream, ok := s.streams[sid]; ok {
-								stream.pushBytes(buffer[:plen])
-							} else {
-								s.pushWrite(headerBytes(newCmd(cmdPSH, err_broken_pipe, true), sid, 0))
-							}
-							s.streamLock.Unlock()
+				if length > 0 {
+					if _, err := io.ReadFull(s.conn, buffer[:length]); err == nil {
+						s.streamLock.Lock()
+						if stream, ok := s.streams[sid]; ok {
+							stream.pushBytes(buffer[:length])
 						} else {
-							s.notifyReadError(err)
-							return
+							s.pushWrite(headerBytes(cmdFIN, sid, 0))
 						}
+						s.streamLock.Unlock()
+					} else {
+						s.notifyReadError(err)
+						return
 					}
-				} else {
-					s.streamLock.Lock()
-					if stream, ok := s.streams[sid]; ok {
-						if code == err_ok {
-							stream.updateWindows(cmdPSH, plen)
-						} else {
-							stream.fin()
-						}
-					}
-					s.streamLock.Unlock()
 				}
-			case cmdRSH:
+			case cmdUPW:
 				s.streamLock.Lock()
 				if stream, ok := s.streams[sid]; ok {
-					stream.updateWindows(cmdRSH, hdr.Length())
+					stream.updateWindows(length)
 				}
 				s.streamLock.Unlock()
 			default:
@@ -216,6 +205,7 @@ func (this *Session) pushWrite(b []byte) {
 }
 
 func (this *Session) closeStream(sid uint32) {
+	fmt.Println("closeStream", sid)
 	this.streamLock.Lock()
 	defer this.streamLock.Unlock()
 	if _, ok := this.streams[sid]; ok {

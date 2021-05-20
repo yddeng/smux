@@ -23,15 +23,6 @@ func listen(addr string, f func(session *Session)) {
 	}
 }
 
-func dial(addr string) *Session {
-	conn, err := net.Dial("tcp", addr)
-	if err != nil {
-		panic(err)
-	}
-
-	return Client(conn.(*net.TCPConn))
-}
-
 var ch = make(chan struct{})
 
 func handle(s *Stream) {
@@ -44,8 +35,8 @@ func handle(s *Stream) {
 				panic(err)
 			}
 			fmt.Println("s2 read", s.StreamID(), n)
-			n, err = s.Write(b[:n])
-			fmt.Println("s2 write", s.StreamID(), n, err)
+			//n, err = s.Write(b[:n])
+			//fmt.Println("s2 write", s.StreamID(), n, err)
 		}
 	}()
 }
@@ -62,16 +53,19 @@ func TestSmux(t *testing.T) {
 					panic(err)
 				}
 				fmt.Println("new stream", s.StreamID())
-				if s.StreamID() == 4 {
-					handle(s)
-				}
+				handle(s)
 			}
 		}()
 	})
 
 	time.Sleep(time.Second)
 
-	s := dial(addr)
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		panic(err)
+	}
+
+	s := Client(conn.(*net.TCPConn))
 	stream, err := s.Open()
 	if err != nil {
 		panic(err)
@@ -93,15 +87,18 @@ func TestSmux(t *testing.T) {
 
 	fmt.Println("fullWrite", sum)
 	close(ch)
-
+	//conn.Close()
+	stream.SetWriteDeadline(time.Time{})
+	n, err := stream.Write(data)
+	fmt.Println("s1 write", n, err)
 	//n, err := stream.Read(data)
 	//fmt.Println("s1 read", n, err)
-	//stream.Close()
+	stream.Close()
 
-	stream2, _ := s.Open()
-	n, err := stream2.Write(data)
-	fmt.Println("s2 write", n, err)
+	//stream2, _ := s.Open()
+	//n, err := stream2.Write(data)
+	//fmt.Println("s2 write", n, err)
 
-	time.Sleep(time.Second * 5)
+	time.Sleep(time.Second * 10)
 
 }

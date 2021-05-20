@@ -26,9 +26,9 @@ type Stream struct {
 	chWriteEvent chan struct{}
 
 	// do write
-	isWriting bool
-	rWindow   uint16
-	sendLock  sync.Mutex
+	isWriting  bool
+	windowSize uint16
+	writeLock  sync.Mutex
 
 	// deadlines
 	readDeadline  atomic.Value
@@ -54,8 +54,8 @@ func newStream(sid uint32, s *Session) *Stream {
 		chReadEvent:     make(chan struct{}, 1),
 		chWriteEvent:    make(chan struct{}, 1),
 		isWriting:       false,
-		rWindow:         frameSize,
-		sendLock:        sync.Mutex{},
+		windowSize:      frameSize,
+		writeLock:       sync.Mutex{},
 		readDeadline:    atomic.Value{},
 		writeDeadline:   atomic.Value{},
 		chClose:         make(chan struct{}),
@@ -100,14 +100,14 @@ func (this *Stream) tryRead(b []byte) (n int, err error) {
 	if this.readBuffer.Empty() {
 		return -1, nil
 	} else {
-		needRSH := streamWindowSize-this.readBuffer.Len() <= 0
+		needUPW := streamWindowSize-this.readBuffer.Len() <= 0
 		n, err = this.readBuffer.Read(b)
 		wind := streamWindowSize - this.readBuffer.Len()
-		if err == nil && wind > 0 && needRSH {
+		if err == nil && wind > 0 && needUPW {
 			if wind > frameSize {
 				wind = frameSize
 			}
-			this.session.pushWrite(headerBytes(cmdRSH, this.streamID, uint16(wind)))
+			this.session.pushWrite(headerBytes(cmdUPW, this.streamID, uint16(wind)))
 		}
 		return
 	}
@@ -144,7 +144,7 @@ func (this *Stream) waitRead() error {
 func (this *Stream) pushBytes(b []byte) {
 	select {
 	case <-this.chClose:
-		this.session.pushWrite(headerBytes(newCmd(cmdPSH, err_broken_pipe, true), this.streamID, 0))
+		this.session.pushWrite(headerBytes(cmdFIN, this.streamID, 0))
 		return
 	default:
 	}
@@ -165,7 +165,7 @@ func (this *Stream) pushBytes(b []byte) {
 	if wind > frameSize {
 		wind = frameSize
 	}
-	this.session.pushWrite(headerBytes(newCmd(cmdPSH, err_ok, true), this.streamID, uint16(wind)))
+	this.session.pushWrite(headerBytes(cmdUPW, this.streamID, uint16(wind)))
 }
 
 func (this *Stream) Write(b []byte) (n int, err error) {
@@ -211,27 +211,19 @@ func (this *Stream) Write(b []byte) (n int, err error) {
 	return
 }
 
-func (this *Stream) updateWindows(cmd byte, win uint16) {
-	fmt.Println("update", win)
-	switch cmd {
-	case cmdPSH:
-		this.sendLock.Lock()
-		this.rWindow = win
-		this.isWriting = false
-		this.sendLock.Unlock()
-	case cmdRSH:
-		this.sendLock.Lock()
-		this.rWindow = win
-		this.isWriting = false
-		this.sendLock.Unlock()
-	}
+func (this *Stream) updateWindows(win uint16) {
+	this.writeLock.Lock()
+	this.windowSize = win
+	this.isWriting = false
+	this.writeLock.Unlock()
+
 	notifyEvent(this.chWriteEvent)
 	this.doWrite()
 }
 
 func (this *Stream) doWrite() {
-	this.sendLock.Lock()
-	defer this.sendLock.Unlock()
+	this.writeLock.Lock()
+	defer this.writeLock.Unlock()
 
 	this.writeBufferLock.Lock()
 	defer this.writeBufferLock.Unlock()
@@ -245,13 +237,13 @@ func (this *Stream) doWrite() {
 		}
 	}
 
-	if this.isWriting || this.rWindow == 0 {
+	if this.isWriting || this.windowSize == 0 {
 		return
 	}
 
 	wind := this.writeBuffer.Len()
-	if wind > int(this.rWindow) {
-		wind = int(this.rWindow)
+	if wind > int(this.windowSize) {
+		wind = int(this.windowSize)
 	}
 	buf := make([]byte, headerSize+wind)
 	n, _ := this.writeBuffer.Read(buf[headerSize:])
@@ -277,6 +269,7 @@ func (s *Stream) Close() error {
 
 func (this *Stream) fin() {
 	this.finOnce.Do(func() {
+		fmt.Println(this.streamID, "fin")
 		close(this.chFin)
 	})
 }
