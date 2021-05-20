@@ -28,16 +28,34 @@ var ch = make(chan struct{})
 func handle(s *Stream) {
 	go func() {
 		<-ch
-		b := make([]byte, 65535)
+		b := make([]byte, 64*1024)
+		sum := 0
+		//for {
+		//	n, err := s.Read(b)
+		//	if err != nil {
+		//		fmt.Println("s2", err)
+		//		break
+		//	}
+		//	sum += n
+		//	fmt.Println("s2 read", s.StreamID(), n)
+		//	n, err = s.Write(b[:n])
+		//	fmt.Println("s2 write", s.StreamID(), n, err)
+		//	if err != nil {
+		//		break
+		//	}
+		//}
+
 		for {
-			n, err := s.Read(b)
+			s.SetWriteDeadline(time.Now().Add(time.Second))
+			n, err := s.Write(b)
+			fmt.Println("s2 write", n, err)
+			sum += n
 			if err != nil {
-				panic(err)
+				break
 			}
-			fmt.Println("s2 read", s.StreamID(), n)
-			//n, err = s.Write(b[:n])
-			//fmt.Println("s2 write", s.StreamID(), n, err)
+			time.Sleep(time.Millisecond * 100)
 		}
+		fmt.Println("s2 read all length", sum)
 	}()
 }
 
@@ -73,7 +91,7 @@ func TestSmux(t *testing.T) {
 
 	fmt.Println("s1", stream.StreamID())
 
-	data := make([]byte, 1024*64)
+	data := make([]byte, 64*1024)
 	sum := 0
 	for {
 		stream.SetWriteDeadline(time.Now().Add(time.Second))
@@ -89,8 +107,8 @@ func TestSmux(t *testing.T) {
 	close(ch)
 	//conn.Close()
 	stream.SetWriteDeadline(time.Time{})
-	n, err := stream.Write(data)
-	fmt.Println("s1 write", n, err)
+	//n, err := stream.Write(data)
+	//fmt.Println("s1 write", n, err)
 	//n, err := stream.Read(data)
 	//fmt.Println("s1 read", n, err)
 	stream.Close()

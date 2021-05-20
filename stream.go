@@ -1,7 +1,6 @@
 package smux
 
 import (
-	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -172,6 +171,8 @@ func (this *Stream) Write(b []byte) (n int, err error) {
 	select {
 	case <-this.chClose:
 		return 0, ErrClosedPipe
+	case <-this.chFin:
+		return 0, ErrBrokenPipe
 	default:
 	}
 
@@ -189,7 +190,6 @@ func (this *Stream) Write(b []byte) (n int, err error) {
 		this.writeBufferLock.Lock()
 		if this.writeBuffer.Full() {
 			this.writeBufferLock.Unlock()
-			fmt.Println("write wait")
 			select {
 			case <-this.chWriteEvent:
 			case <-this.chFin:
@@ -269,7 +269,6 @@ func (s *Stream) Close() error {
 
 func (this *Stream) fin() {
 	this.finOnce.Do(func() {
-		fmt.Println(this.streamID, "fin")
 		close(this.chFin)
 	})
 }

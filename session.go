@@ -1,7 +1,6 @@
 package smux
 
 import (
-	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -172,9 +171,11 @@ func (s *Session) readLoop() {
 			case cmdUPW:
 				s.streamLock.Lock()
 				if stream, ok := s.streams[sid]; ok {
+					s.streamLock.Unlock()
 					stream.updateWindows(length)
+				} else {
+					s.streamLock.Unlock()
 				}
-				s.streamLock.Unlock()
 			default:
 				s.notifyReadError(ErrInvalidCmd)
 				return
@@ -190,7 +191,6 @@ func (this *Session) writeLoop() {
 	for {
 		select {
 		case data := <-this.chWriten:
-			//fmt.Println("write", len(data))
 			_, err := this.conn.Write(data)
 			if err != nil {
 				this.notifyWriteError(err)
@@ -205,7 +205,6 @@ func (this *Session) pushWrite(b []byte) {
 }
 
 func (this *Session) closeStream(sid uint32) {
-	fmt.Println("closeStream", sid)
 	this.streamLock.Lock()
 	defer this.streamLock.Unlock()
 	if _, ok := this.streams[sid]; ok {
