@@ -1,6 +1,7 @@
 package smux
 
 import (
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -8,17 +9,17 @@ import (
 	"time"
 )
 
-const streamWindowSize = 1024 * 512
+const (
+	initPeerWindowSize = frameSize
+	streamWindowSize   = 512 * 1024
+)
 
 type Stream struct {
-	session  *Session
+	sess     *Session
 	streamID uint32
 
-	readBuffer     *Buffer
-	readBufferLock sync.Mutex
-
-	writeBuffer     *Buffer
-	writeBufferLock sync.Mutex
+	buffer     *Buffer
+	bufferLock sync.Mutex
 
 	// notify a read/write event
 	chReadEvent  chan struct{}
@@ -26,7 +27,7 @@ type Stream struct {
 
 	// do write
 	isWriting  bool
-	windowSize uint16
+	peerWindow uint16
 	writeLock  sync.Mutex
 
 	// deadlines
@@ -42,25 +43,23 @@ type Stream struct {
 	finOnce sync.Once
 }
 
-func newStream(sid uint32, s *Session) *Stream {
+func newStream(sid uint32, sess *Session) *Stream {
 	return &Stream{
-		session:         s,
-		streamID:        sid,
-		readBuffer:      New(streamWindowSize),
-		readBufferLock:  sync.Mutex{},
-		writeBuffer:     New(streamWindowSize),
-		writeBufferLock: sync.Mutex{},
-		chReadEvent:     make(chan struct{}, 1),
-		chWriteEvent:    make(chan struct{}, 1),
-		isWriting:       false,
-		windowSize:      frameSize,
-		writeLock:       sync.Mutex{},
-		readDeadline:    atomic.Value{},
-		writeDeadline:   atomic.Value{},
-		chClose:         make(chan struct{}),
-		closeOnce:       sync.Once{},
-		chFin:           make(chan struct{}),
-		finOnce:         sync.Once{},
+		sess:          sess,
+		streamID:      sid,
+		buffer:        New(streamWindowSize),
+		bufferLock:    sync.Mutex{},
+		chReadEvent:   make(chan struct{}, 1),
+		chWriteEvent:  make(chan struct{}, 1),
+		isWriting:     false,
+		peerWindow:    initPeerWindowSize,
+		writeLock:     sync.Mutex{},
+		readDeadline:  atomic.Value{},
+		writeDeadline: atomic.Value{},
+		chClose:       make(chan struct{}),
+		closeOnce:     sync.Once{},
+		chFin:         make(chan struct{}),
+		finOnce:       sync.Once{},
 	}
 }
 
@@ -93,20 +92,20 @@ func (this *Stream) tryRead(b []byte) (n int, err error) {
 		return
 	}
 
-	this.readBufferLock.Lock()
-	defer this.readBufferLock.Unlock()
+	this.bufferLock.Lock()
+	defer this.bufferLock.Unlock()
 
-	if this.readBuffer.Empty() {
+	if this.buffer.Empty() {
 		return -1, nil
 	} else {
-		needUPW := streamWindowSize-this.readBuffer.Len() <= 0
-		n, err = this.readBuffer.Read(b)
-		wind := streamWindowSize - this.readBuffer.Len()
+		needUPW := streamWindowSize-this.buffer.Len() <= 0
+		n, err = this.buffer.Read(b)
+		wind := streamWindowSize - this.buffer.Len()
 		if err == nil && wind > 0 && needUPW {
 			if wind > frameSize {
 				wind = frameSize
 			}
-			this.session.pushWrite(headerBytes(cmdUPW, this.streamID, uint16(wind)))
+			this.sess.write(headerBytes(cmdUPW, this.streamID, uint16(wind)))
 		}
 		return
 	}
@@ -125,14 +124,14 @@ func (this *Stream) waitRead() error {
 	case <-this.chReadEvent:
 		return nil
 	case <-this.chFin:
-		this.readBufferLock.Lock()
-		defer this.readBufferLock.Unlock()
-		if !this.readBuffer.Empty() {
+		this.bufferLock.Lock()
+		defer this.bufferLock.Unlock()
+		if !this.buffer.Empty() {
 			return nil
 		}
 		return io.EOF
-	case <-this.session.chSocketReadError:
-		return this.session.socketReadError.Load().(error)
+	case <-this.sess.chSocketReadError:
+		return this.sess.socketReadError.Load().(error)
 	case <-deadline:
 		return ErrTimeout
 	case <-this.chClose:
@@ -143,18 +142,17 @@ func (this *Stream) waitRead() error {
 func (this *Stream) pushBytes(b []byte) {
 	select {
 	case <-this.chClose:
-		this.session.pushWrite(headerBytes(cmdFIN, this.streamID, 0))
 		return
 	default:
 	}
 
-	this.readBufferLock.Lock()
-	if this.readBuffer.Len()+len(b) > this.readBuffer.Cap() {
-		this.readBuffer.Grow(len(b))
+	this.bufferLock.Lock()
+	if this.buffer.Len()+len(b) > this.buffer.Cap() {
+		this.buffer.Grow(len(b))
 	}
-	this.readBuffer.Write(b)
-	wind := streamWindowSize - this.readBuffer.Len()
-	this.readBufferLock.Unlock()
+	_, _ = this.buffer.Write(b)
+	wind := streamWindowSize - this.buffer.Len()
+	this.bufferLock.Unlock()
 
 	notifyEvent(this.chReadEvent)
 
@@ -164,7 +162,7 @@ func (this *Stream) pushBytes(b []byte) {
 	if wind > frameSize {
 		wind = frameSize
 	}
-	this.session.pushWrite(headerBytes(cmdUPW, this.streamID, uint16(wind)))
+	_, _ = this.sess.write(headerBytes(cmdUPW, this.streamID, uint16(wind)))
 }
 
 func (this *Stream) Write(b []byte) (n int, err error) {
@@ -187,80 +185,60 @@ func (this *Stream) Write(b []byte) (n int, err error) {
 	sentb := b
 	blen := len(sentb)
 	for n < blen {
-		this.writeBufferLock.Lock()
-		if this.writeBuffer.Full() {
-			this.writeBufferLock.Unlock()
+		this.writeLock.Lock()
+		if this.isWriting || this.peerWindow == 0 {
+			this.writeLock.Unlock()
 			select {
 			case <-this.chWriteEvent:
 			case <-this.chFin:
 				return 0, ErrBrokenPipe
-			case <-this.session.chSocketWriteError:
-				return 0, this.session.socketWriteError.Load().(error)
+			case <-this.sess.chSocketWriteError:
+				return 0, this.sess.socketWriteError.Load().(error)
 			case <-deadline:
 				return n, ErrTimeout
 			case <-this.chClose:
 				return 0, ErrClosedPipe
 			}
 		} else {
-			writen, _ := this.writeBuffer.Write(sentb[n:])
-			n += writen
-			this.writeBufferLock.Unlock()
-			this.doWrite()
+			sz := blen - n
+			if sz > int(this.peerWindow) {
+				sz = int(this.peerWindow)
+			}
+			buf := make([]byte, headerSize+sz)
+			headerWrite(cmdPSH, this.streamID, uint16(sz), buf)
+			copy(buf[headerSize:], sentb[n:n+sz])
+			sendn, err := this.sess.write(buf)
+			if err != nil {
+				this.writeLock.Unlock()
+				return n, err
+			}
+			this.isWriting = true
+			n += sendn - headerSize
+			fmt.Println("write", sendn, n)
+			this.writeLock.Unlock()
 		}
 	}
 	return
 }
 
-func (this *Stream) updateWindows(win uint16) {
+func (this *Stream) windowUpdate(win uint16) {
 	this.writeLock.Lock()
-	this.windowSize = win
+	this.peerWindow = win
 	this.isWriting = false
 	this.writeLock.Unlock()
 
 	notifyEvent(this.chWriteEvent)
-	this.doWrite()
 }
 
-func (this *Stream) doWrite() {
-	this.writeLock.Lock()
-	defer this.writeLock.Unlock()
-
-	this.writeBufferLock.Lock()
-	defer this.writeBufferLock.Unlock()
-
-	if this.writeBuffer.Empty() {
-		select {
-		case <-this.chClose:
-			this.session.closeStream(this.streamID)
-		default:
-			return
-		}
-	}
-
-	if this.isWriting || this.windowSize == 0 {
-		return
-	}
-
-	wind := this.writeBuffer.Len()
-	if wind > int(this.windowSize) {
-		wind = int(this.windowSize)
-	}
-	buf := make([]byte, headerSize+wind)
-	n, _ := this.writeBuffer.Read(buf[headerSize:])
-	copy(buf, headerBytes(cmdPSH, this.streamID, uint16(n)))
-	this.isWriting = true
-	this.session.pushWrite(buf[:headerSize+n])
-}
-
-func (s *Stream) Close() error {
+func (this *Stream) Close() error {
 	var once bool
-	s.closeOnce.Do(func() {
-		close(s.chClose)
+	this.closeOnce.Do(func() {
+		close(this.chClose)
 		once = true
 	})
 
 	if once {
-		s.doWrite()
+		this.sess.closedStream(this.streamID)
 		return nil
 	} else {
 		return ErrClosedPipe
@@ -276,38 +254,38 @@ func (this *Stream) fin() {
 // SetReadDeadline sets the read deadline as defined by
 // net.Conn.SetReadDeadline.
 // A zero time value disables the deadline.
-func (s *Stream) SetReadDeadline(t time.Time) error {
-	s.readDeadline.Store(t)
+func (this *Stream) SetReadDeadline(t time.Time) error {
+	this.readDeadline.Store(t)
 	return nil
 }
 
 // SetWriteDeadline sets the write deadline as defined by
 // net.Conn.SetWriteDeadline.
 // A zero time value disables the deadline.
-func (s *Stream) SetWriteDeadline(t time.Time) error {
-	s.writeDeadline.Store(t)
+func (this *Stream) SetWriteDeadline(t time.Time) error {
+	this.writeDeadline.Store(t)
 	return nil
 }
 
 // SetDeadline sets both read and write deadlines as defined by
 // net.Conn.SetDeadline.
 // A zero time value disables the deadlines.
-func (s *Stream) SetDeadline(t time.Time) error {
-	if err := s.SetReadDeadline(t); err != nil {
+func (this *Stream) SetDeadline(t time.Time) error {
+	if err := this.SetReadDeadline(t); err != nil {
 		return err
 	}
-	if err := s.SetWriteDeadline(t); err != nil {
+	if err := this.SetWriteDeadline(t); err != nil {
 		return err
 	}
 	return nil
 }
 
 // LocalAddr satisfies net.Conn interface
-func (s *Stream) LocalAddr() net.Addr {
-	return s.session.conn.LocalAddr()
+func (this *Stream) LocalAddr() net.Addr {
+	return this.sess.conn.LocalAddr()
 }
 
 // RemoteAddr satisfies net.Conn interface
-func (s *Stream) RemoteAddr() net.Addr {
-	return s.session.conn.RemoteAddr()
+func (this *Stream) RemoteAddr() net.Addr {
+	return this.sess.conn.RemoteAddr()
 }

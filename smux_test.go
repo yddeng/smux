@@ -30,31 +30,31 @@ func handle(s *Stream) {
 		<-ch
 		b := make([]byte, 64*1024)
 		sum := 0
-		//for {
-		//	n, err := s.Read(b)
-		//	if err != nil {
-		//		fmt.Println("s2", err)
-		//		break
-		//	}
-		//	sum += n
-		//	fmt.Println("s2 read", s.StreamID(), n)
-		//	n, err = s.Write(b[:n])
-		//	fmt.Println("s2 write", s.StreamID(), n, err)
-		//	if err != nil {
-		//		break
-		//	}
-		//}
-
 		for {
-			s.SetWriteDeadline(time.Now().Add(time.Second))
-			n, err := s.Write(b)
-			fmt.Println("s2 write", n, err)
+			n, err := s.Read(b)
+			if err != nil {
+				fmt.Println("s2", err)
+				break
+			}
 			sum += n
+			fmt.Println("s2 read", s.StreamID(), n)
+			n, err = s.Write(b[:n])
+			fmt.Println("s2 write", s.StreamID(), n, err)
 			if err != nil {
 				break
 			}
-			time.Sleep(time.Millisecond * 100)
 		}
+
+		//for {
+		//	s.SetWriteDeadline(time.Now().Add(time.Second))
+		//	n, err := s.Write(b)
+		//	fmt.Println("s2 write", n, err)
+		//	sum += n
+		//	if err != nil {
+		//		break
+		//	}
+		//	time.Sleep(time.Millisecond * 100)
+		//}
 		fmt.Println("s2 read all length", sum)
 	}()
 }

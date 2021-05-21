@@ -11,15 +11,11 @@ const (
 	cmdUPW             // update window size
 )
 
-// cmd 高1位 为请求回复标记位，0请求1回复
-// cmd 高2-4位，错误码，0成功
-// cmd 低4-8位，cmd
-
 /*
-	cmdSYN : cmd + sid + win
-	cmdFIN : cmd + sid + win
-	cmdPSH : cmd + sid + len + data
-	cmdUPW : cmd + sid + win
+	cmdSYN : streamID
+	cmdFIN : streamID
+	cmdPSH : streamID + 推送的数据长度 + data
+	cmdUPW ：streamID + 读缓存剩余容量
 */
 
 const (
@@ -29,7 +25,7 @@ const (
 	headerSize = sizeOfCmd + sizeOfSid + sizeOfLen
 )
 
-const frameSize = 65535
+const frameSize = 65535 - headerSize
 
 type header [headerSize]byte
 
@@ -51,4 +47,10 @@ func headerBytes(cmd byte, sid uint32, len uint16) []byte {
 	binary.LittleEndian.PutUint32(hdr[1:], sid)
 	binary.LittleEndian.PutUint16(hdr[5:], len)
 	return hdr
+}
+
+func headerWrite(cmd byte, sid uint32, len uint16, b []byte) {
+	b[0] = cmd
+	binary.LittleEndian.PutUint32(b[1:], sid)
+	binary.LittleEndian.PutUint16(b[5:], len)
 }

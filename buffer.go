@@ -1,5 +1,7 @@
 package smux
 
+import "sync"
+
 type Buffer struct {
 	r, w  int
 	buf   []byte
@@ -24,6 +26,12 @@ func (b *Buffer) Full() bool {
 		return true
 	}
 	return false
+}
+
+func (b *Buffer) Clear() {
+	b.r = 0
+	b.w = 0
+	b.empty = true
 }
 
 func (b *Buffer) Len() int {
@@ -139,4 +147,10 @@ func (b *Buffer) Reset(n int) {
 		}
 	}
 
+}
+
+var bufferPool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 1<<16)
+	},
 }

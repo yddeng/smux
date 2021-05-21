@@ -16,8 +16,6 @@ type Session struct {
 	streams    map[uint32]*Stream
 	streamLock sync.Mutex
 
-	chWriten chan []byte
-
 	chAccepts chan *Stream
 
 	socketReadError      atomic.Value
@@ -27,8 +25,10 @@ type Session struct {
 	socketReadErrorOnce  sync.Once
 	socketWriteErrorOnce sync.Once
 
-	die     chan struct{}
-	dieOnce sync.Once
+	chClose   chan struct{}
+	closeOnce sync.Once
+
+	writeLock sync.Mutex
 }
 
 func newSession(conn *net.TCPConn, netStreamID uint32) *Session {
@@ -38,7 +38,6 @@ func newSession(conn *net.TCPConn, netStreamID uint32) *Session {
 		nextStreamIDLock:     sync.Mutex{},
 		streams:              map[uint32]*Stream{},
 		streamLock:           sync.Mutex{},
-		chWriten:             make(chan []byte, 1024),
 		chAccepts:            make(chan *Stream, 1024),
 		socketReadError:      atomic.Value{},
 		socketWriteError:     atomic.Value{},
@@ -46,12 +45,11 @@ func newSession(conn *net.TCPConn, netStreamID uint32) *Session {
 		chSocketWriteError:   make(chan struct{}),
 		socketReadErrorOnce:  sync.Once{},
 		socketWriteErrorOnce: sync.Once{},
-		die:                  make(chan struct{}),
-		dieOnce:              sync.Once{},
+		chClose:              make(chan struct{}),
+		closeOnce:            sync.Once{},
 	}
 
 	go sess.readLoop()
-	go sess.writeLoop()
 	return sess
 }
 
@@ -61,7 +59,7 @@ func (this *Session) Accept() (*Stream, error) {
 		return stream, nil
 	case <-this.chSocketReadError:
 		return nil, this.socketReadError.Load().(error)
-	case <-this.die:
+	case <-this.chClose:
 		return nil, ErrClosedPipe
 	}
 }
@@ -77,138 +75,135 @@ func (this *Session) Open() (*Stream, error) {
 	this.streams[sid] = s
 	this.streamLock.Unlock()
 
-	this.pushWrite(headerBytes(cmdSYN, sid, 0))
+	this.write(headerBytes(cmdSYN, sid, 0))
 	return s, nil
 }
 
 // IsClosed does a safe check to see if we have shutdown
-func (s *Session) IsClosed() bool {
+func (this *Session) IsClosed() bool {
 	select {
-	case <-s.die:
+	case <-this.chClose:
 		return true
 	default:
 		return false
 	}
 }
 
-func (s *Session) Close() error {
+func (this *Session) Close() error {
 	var once bool
-	s.dieOnce.Do(func() {
-		close(s.die)
+	this.closeOnce.Do(func() {
+		close(this.chClose)
 		once = true
 	})
 
 	if once {
-		s.streamLock.Lock()
-		for k := range s.streams {
-			s.streams[k].fin()
+		this.streamLock.Lock()
+		for sid := range this.streams {
+			this.streams[sid].fin()
+			_, _ = this.write(headerBytes(cmdFIN, sid, 0))
 		}
-		s.streamLock.Unlock()
-		return s.conn.Close()
+		this.streamLock.Unlock()
+		return this.conn.Close()
 	} else {
 		return io.ErrClosedPipe
 	}
 }
 
-func (s *Session) notifyReadError(err error) {
-	s.socketReadErrorOnce.Do(func() {
-		s.socketReadError.Store(err)
-		close(s.chSocketReadError)
+func (this *Session) notifyReadError(err error) {
+	this.socketReadErrorOnce.Do(func() {
+		this.socketReadError.Store(err)
+		close(this.chSocketReadError)
 	})
 }
 
-func (s *Session) notifyWriteError(err error) {
-	s.socketWriteErrorOnce.Do(func() {
-		s.socketWriteError.Store(err)
-		close(s.chSocketWriteError)
+func (this *Session) notifyWriteError(err error) {
+	this.socketWriteErrorOnce.Do(func() {
+		this.socketWriteError.Store(err)
+		close(this.chSocketWriteError)
 	})
 }
 
-func (s *Session) readLoop() {
+func (this *Session) readLoop() {
 	var (
 		hdr    header
 		buffer = make([]byte, frameSize)
 	)
 	for {
 		// read header first
-		if _, err := io.ReadFull(s.conn, hdr[:]); err == nil {
+		if _, err := io.ReadFull(this.conn, hdr[:]); err == nil {
 			cmd := hdr.Cmd()
 			sid := hdr.StreamID()
 			length := hdr.Length()
 			switch cmd {
 			case cmdSYN:
-				s.streamLock.Lock()
-				if _, ok := s.streams[sid]; !ok {
-					stream := newStream(sid, s)
-					s.streams[sid] = stream
+				this.streamLock.Lock()
+				if _, ok := this.streams[sid]; !ok {
+					stream := newStream(sid, this)
+					this.streams[sid] = stream
 					select {
-					case s.chAccepts <- stream:
-					case <-s.die:
+					case this.chAccepts <- stream:
+					case <-this.chClose:
 					}
 				}
-				s.streamLock.Unlock()
+				this.streamLock.Unlock()
 			case cmdFIN:
-				s.streamLock.Lock()
-				if stream, ok := s.streams[sid]; ok {
+				this.streamLock.Lock()
+				if stream, ok := this.streams[sid]; ok {
 					stream.fin()
+					delete(this.streams, sid)
 				}
-				s.streamLock.Unlock()
+				this.streamLock.Unlock()
 			case cmdPSH:
 				if length > 0 {
-					if _, err := io.ReadFull(s.conn, buffer[:length]); err == nil {
-						s.streamLock.Lock()
-						if stream, ok := s.streams[sid]; ok {
+					if _, err := io.ReadFull(this.conn, buffer[:length]); err == nil {
+						this.streamLock.Lock()
+						if stream, ok := this.streams[sid]; ok {
 							stream.pushBytes(buffer[:length])
-						} else {
-							s.pushWrite(headerBytes(cmdFIN, sid, 0))
 						}
-						s.streamLock.Unlock()
+						this.streamLock.Unlock()
 					} else {
-						s.notifyReadError(err)
+						this.notifyReadError(err)
 						return
 					}
 				}
 			case cmdUPW:
-				s.streamLock.Lock()
-				if stream, ok := s.streams[sid]; ok {
-					s.streamLock.Unlock()
-					stream.updateWindows(length)
-				} else {
-					s.streamLock.Unlock()
+				this.streamLock.Lock()
+				if stream, ok := this.streams[sid]; ok {
+					stream.windowUpdate(length)
 				}
+				this.streamLock.Unlock()
 			default:
-				s.notifyReadError(ErrInvalidCmd)
+				this.notifyReadError(ErrInvalidCmd)
 				return
 			}
 		} else {
-			s.notifyReadError(err)
+			this.notifyReadError(err)
 			return
 		}
 	}
 }
 
-func (this *Session) writeLoop() {
-	for {
-		select {
-		case data := <-this.chWriten:
-			_, err := this.conn.Write(data)
-			if err != nil {
-				this.notifyWriteError(err)
-				return
-			}
+func (this *Session) write(b []byte) (n int, err error) {
+	select {
+	case <-this.chClose:
+		return 0, ErrClosedPipe
+	default:
+		this.writeLock.Lock()
+		defer this.writeLock.Unlock()
+		n, err = this.conn.Write(b)
+		if err != nil {
+			this.notifyWriteError(err)
+			return
 		}
+		return
 	}
 }
 
-func (this *Session) pushWrite(b []byte) {
-	this.chWriten <- b
-}
-
-func (this *Session) closeStream(sid uint32) {
+func (this *Session) closedStream(sid uint32) {
 	this.streamLock.Lock()
 	defer this.streamLock.Unlock()
 	if _, ok := this.streams[sid]; ok {
-		this.pushWrite(headerBytes(cmdFIN, sid, 0))
+		_, _ = this.write(headerBytes(cmdFIN, sid, 0))
 		delete(this.streams, sid)
 	}
 }
