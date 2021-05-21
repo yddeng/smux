@@ -1,7 +1,6 @@
 package smux
 
 import (
-	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -9,15 +8,13 @@ import (
 	"time"
 )
 
-const (
-	initPeerWindowSize = frameSize
-	streamWindowSize   = 512 * 1024
-)
+const streamWindowSize = 512 * 1024
 
 type Stream struct {
 	sess     *Session
 	streamID uint32
 
+	bufferRead uint32
 	buffer     *Buffer
 	bufferLock sync.Mutex
 
@@ -26,9 +23,8 @@ type Stream struct {
 	chWriteEvent chan struct{}
 
 	// do write
-	isWriting  bool
-	peerWindow uint16
-	writeLock  sync.Mutex
+	waitConfirm uint32
+	writeLock   sync.Mutex
 
 	// deadlines
 	readDeadline  atomic.Value
@@ -51,8 +47,6 @@ func newStream(sid uint32, sess *Session) *Stream {
 		bufferLock:    sync.Mutex{},
 		chReadEvent:   make(chan struct{}, 1),
 		chWriteEvent:  make(chan struct{}, 1),
-		isWriting:     false,
-		peerWindow:    initPeerWindowSize,
 		writeLock:     sync.Mutex{},
 		readDeadline:  atomic.Value{},
 		writeDeadline: atomic.Value{},
@@ -98,14 +92,11 @@ func (this *Stream) tryRead(b []byte) (n int, err error) {
 	if this.buffer.Empty() {
 		return -1, nil
 	} else {
-		needUPW := streamWindowSize-this.buffer.Len() <= 0
 		n, err = this.buffer.Read(b)
-		wind := streamWindowSize - this.buffer.Len()
-		if err == nil && wind > 0 && needUPW {
-			if wind > frameSize {
-				wind = frameSize
-			}
-			this.sess.write(headerBytes(cmdUPW, this.streamID, uint16(wind)))
+		this.bufferRead += uint32(n)
+		if this.bufferRead > streamWindowSize/2 {
+			this.sess.write(newHeader(cmdCFM, this.streamID, this.bufferRead), nil)
+			this.bufferRead = 0
 		}
 		return
 	}
@@ -151,18 +142,8 @@ func (this *Stream) pushBytes(b []byte) {
 		this.buffer.Grow(len(b))
 	}
 	_, _ = this.buffer.Write(b)
-	wind := streamWindowSize - this.buffer.Len()
-	this.bufferLock.Unlock()
-
 	notifyEvent(this.chReadEvent)
-
-	if wind <= 0 {
-		wind = 0
-	}
-	if wind > frameSize {
-		wind = frameSize
-	}
-	_, _ = this.sess.write(headerBytes(cmdUPW, this.streamID, uint16(wind)))
+	this.bufferLock.Unlock()
 }
 
 func (this *Stream) Write(b []byte) (n int, err error) {
@@ -186,7 +167,8 @@ func (this *Stream) Write(b []byte) (n int, err error) {
 	blen := len(sentb)
 	for n < blen {
 		this.writeLock.Lock()
-		if this.isWriting || this.peerWindow == 0 {
+		wSize := streamWindowSize - this.waitConfirm
+		if wSize <= 0 {
 			this.writeLock.Unlock()
 			select {
 			case <-this.chWriteEvent:
@@ -201,32 +183,29 @@ func (this *Stream) Write(b []byte) (n int, err error) {
 			}
 		} else {
 			sz := blen - n
-			if sz > int(this.peerWindow) {
-				sz = int(this.peerWindow)
+			if sz > int(wSize) {
+				sz = int(wSize)
 			}
-			buf := make([]byte, headerSize+sz)
-			headerWrite(cmdPSH, this.streamID, uint16(sz), buf)
-			copy(buf[headerSize:], sentb[n:n+sz])
-			sendn, err := this.sess.write(buf)
+			if sz > frameSize {
+				sz = frameSize
+			}
+			sendn, err := this.sess.write(newHeader(cmdPSH, this.streamID, uint32(sz)), sentb[n:n+sz])
 			if err != nil {
 				this.writeLock.Unlock()
 				return n, err
 			}
-			this.isWriting = true
-			n += sendn - headerSize
-			fmt.Println("write", sendn, n)
+			this.waitConfirm += uint32(sendn)
+			n += sendn
 			this.writeLock.Unlock()
 		}
 	}
 	return
 }
 
-func (this *Stream) windowUpdate(win uint16) {
+func (this *Stream) bytesConfirm(count uint32) {
 	this.writeLock.Lock()
-	this.peerWindow = win
-	this.isWriting = false
+	this.waitConfirm -= count
 	this.writeLock.Unlock()
-
 	notifyEvent(this.chWriteEvent)
 }
 

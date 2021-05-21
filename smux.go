@@ -3,6 +3,7 @@ package smux
 import (
 	"errors"
 	"net"
+	"time"
 )
 
 var (
@@ -25,4 +26,33 @@ func Server(conn *net.TCPConn) *Session {
 
 func Client(conn *net.TCPConn) *Session {
 	return newSession(conn, 2)
+}
+
+func Listen(address string, callback func(session *Session)) error {
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return err
+	}
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Temporary() {
+				time.Sleep(time.Millisecond * 5)
+				continue
+			} else {
+				return err
+			}
+		}
+
+		callback(Server(conn.(*net.TCPConn)))
+	}
+}
+
+func Dial(address string) (*Session, error) {
+	conn, err := net.Dial("tcp", address)
+	if err != nil {
+		return nil, err
+	}
+	return Client(conn.(*net.TCPConn)), nil
 }

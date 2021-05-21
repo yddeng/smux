@@ -38,32 +38,16 @@ func handle(s *Stream) {
 			}
 			sum += n
 			fmt.Println("s2 read", s.StreamID(), n)
-			n, err = s.Write(b[:n])
-			fmt.Println("s2 write", s.StreamID(), n, err)
-			if err != nil {
-				break
-			}
 		}
 
-		//for {
-		//	s.SetWriteDeadline(time.Now().Add(time.Second))
-		//	n, err := s.Write(b)
-		//	fmt.Println("s2 write", n, err)
-		//	sum += n
-		//	if err != nil {
-		//		break
-		//	}
-		//	time.Sleep(time.Millisecond * 100)
-		//}
 		fmt.Println("s2 read all length", sum)
 	}()
 }
 
-func TestSmux(t *testing.T) {
+func TestFullSend(t *testing.T) {
 	addr := "127.0.0.1:4562"
 	go listen(addr, func(session *Session) {
 		fmt.Println("new session")
-
 		go func() {
 			for {
 				s, err := session.Accept()
@@ -105,18 +89,9 @@ func TestSmux(t *testing.T) {
 
 	fmt.Println("fullWrite", sum)
 	close(ch)
-	//conn.Close()
 	stream.SetWriteDeadline(time.Time{})
-	//n, err := stream.Write(data)
-	//fmt.Println("s1 write", n, err)
-	//n, err := stream.Read(data)
-	//fmt.Println("s1 read", n, err)
 	stream.Close()
 
-	//stream2, _ := s.Open()
-	//n, err := stream2.Write(data)
-	//fmt.Println("s2 write", n, err)
-
-	time.Sleep(time.Second * 10)
+	time.Sleep(time.Second * 5)
 
 }

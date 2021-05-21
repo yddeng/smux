@@ -75,7 +75,7 @@ func (this *Session) Open() (*Stream, error) {
 	this.streams[sid] = s
 	this.streamLock.Unlock()
 
-	this.write(headerBytes(cmdSYN, sid, 0))
+	this.write(newHeader(cmdSYN, sid, 0), nil)
 	return s, nil
 }
 
@@ -100,7 +100,7 @@ func (this *Session) Close() error {
 		this.streamLock.Lock()
 		for sid := range this.streams {
 			this.streams[sid].fin()
-			_, _ = this.write(headerBytes(cmdFIN, sid, 0))
+			_, _ = this.write(newHeader(cmdFIN, sid, 0), nil)
 		}
 		this.streamLock.Unlock()
 		return this.conn.Close()
@@ -166,10 +166,10 @@ func (this *Session) readLoop() {
 						return
 					}
 				}
-			case cmdUPW:
+			case cmdCFM:
 				this.streamLock.Lock()
 				if stream, ok := this.streams[sid]; ok {
-					stream.windowUpdate(length)
+					stream.bytesConfirm(length)
 				}
 				this.streamLock.Unlock()
 			default:
@@ -183,17 +183,27 @@ func (this *Session) readLoop() {
 	}
 }
 
-func (this *Session) write(b []byte) (n int, err error) {
+func (this *Session) write(h []byte, b []byte) (n int, err error) {
+	defer putHeader(h)
 	select {
 	case <-this.chClose:
 		return 0, ErrClosedPipe
+	case <-this.chSocketWriteError:
+		return 0, this.socketWriteError.Load().(error)
 	default:
 		this.writeLock.Lock()
 		defer this.writeLock.Unlock()
-		n, err = this.conn.Write(b)
+		_, err = this.conn.Write(h)
 		if err != nil {
 			this.notifyWriteError(err)
 			return
+		}
+		if b != nil && len(b) != 0 {
+			n, err = this.conn.Write(b)
+			if err != nil {
+				this.notifyWriteError(err)
+				return
+			}
 		}
 		return
 	}
@@ -203,7 +213,7 @@ func (this *Session) closedStream(sid uint32) {
 	this.streamLock.Lock()
 	defer this.streamLock.Unlock()
 	if _, ok := this.streams[sid]; ok {
-		_, _ = this.write(headerBytes(cmdFIN, sid, 0))
+		_, _ = this.write(newHeader(cmdFIN, sid, 0), nil)
 		delete(this.streams, sid)
 	}
 }
