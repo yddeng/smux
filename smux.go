@@ -2,6 +2,7 @@ package smux
 
 import (
 	"errors"
+	"io"
 	"net"
 	"time"
 )
@@ -20,11 +21,11 @@ func notifyEvent(ch chan struct{}) {
 	}
 }
 
-func Server(conn *net.TCPConn) *Session {
+func Server(conn net.Conn) *Session {
 	return newSession(conn, 1)
 }
 
-func Client(conn *net.TCPConn) *Session {
+func Client(conn net.Conn) *Session {
 	return newSession(conn, 2)
 }
 
@@ -45,7 +46,7 @@ func Listen(address string, callback func(session *Session)) error {
 			}
 		}
 
-		callback(Server(conn.(*net.TCPConn)))
+		callback(Server(conn))
 	}
 }
 
@@ -54,5 +55,5 @@ func Dial(address string) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return Client(conn.(*net.TCPConn)), nil
+	return Client(conn), nil
 }

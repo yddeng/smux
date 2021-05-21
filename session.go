@@ -8,7 +8,7 @@ import (
 )
 
 type Session struct {
-	conn *net.TCPConn
+	conn net.Conn
 
 	nextStreamID     uint32
 	nextStreamIDLock sync.Mutex
@@ -31,7 +31,7 @@ type Session struct {
 	writeLock sync.Mutex
 }
 
-func newSession(conn *net.TCPConn, netStreamID uint32) *Session {
+func newSession(conn net.Conn, netStreamID uint32) *Session {
 	sess := &Session{
 		conn:                 conn,
 		nextStreamID:         netStreamID,
