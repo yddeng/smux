@@ -1,7 +1,5 @@
 package smux
 
-import "sync"
-
 type Buffer struct {
 	r, w  int
 	buf   []byte
@@ -117,40 +115,4 @@ func (b *Buffer) Write(buf []byte) (n int, err error) {
 		b.empty = false
 	}
 	return
-}
-
-func (b *Buffer) Bytes(buf []byte) int {
-	if !b.empty {
-		var num int
-		if b.w > b.r {
-			num = copy(buf, b.buf[b.r:b.w])
-		} else {
-			num = copy(buf, b.buf[b.r:])
-			if b.w > 0 {
-				num += copy(buf[num:], b.buf[:b.w])
-			}
-		}
-		return num
-	}
-	return 0
-}
-
-func (b *Buffer) Reset(n int) {
-	if n > b.Len() {
-		n = b.Len()
-	}
-
-	if n > 0 {
-		b.r = (b.r + n) % b.cap
-		if b.r == b.w {
-			b.empty = true
-		}
-	}
-
-}
-
-var bufferPool = sync.Pool{
-	New: func() interface{} {
-		return make([]byte, 1<<16)
-	},
 }

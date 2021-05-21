@@ -27,11 +27,4 @@ func TestNew(t *testing.T) {
 	n, _ = b.Write(d2)
 	fmt.Println(n, b.Empty(), b.Full(), b.Len())
 
-	b.Reset(4)
-	n, _ = b.Write(d2)
-	fmt.Println(n, b.Empty(), b.Full(), b.Len())
-
-	b.Reset(4)
-	n, _ = b.Write(d2)
-	fmt.Println(n, b.Empty(), b.Full(), b.Len())
 }

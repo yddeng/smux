@@ -22,9 +22,8 @@ type Stream struct {
 	chReadEvent  chan struct{}
 	chWriteEvent chan struct{}
 
-	// do write
+	// 已发送待确认的字节数
 	waitConfirm uint32
-	writeLock   sync.Mutex
 
 	// deadlines
 	readDeadline  atomic.Value
@@ -47,7 +46,6 @@ func newStream(sid uint32, sess *Session) *Stream {
 		bufferLock:    sync.Mutex{},
 		chReadEvent:   make(chan struct{}, 1),
 		chWriteEvent:  make(chan struct{}, 1),
-		writeLock:     sync.Mutex{},
 		readDeadline:  atomic.Value{},
 		writeDeadline: atomic.Value{},
 		chClose:       make(chan struct{}),
@@ -94,7 +92,7 @@ func (this *Stream) tryRead(b []byte) (n int, err error) {
 	} else {
 		n, err = this.buffer.Read(b)
 		this.bufferRead += uint32(n)
-		if this.bufferRead > streamWindowSize/2 {
+		if this.bufferRead >= streamWindowSize/2 {
 			this.sess.write(newHeader(cmdCFM, this.streamID, this.bufferRead), nil)
 			this.bufferRead = 0
 		}
@@ -166,10 +164,8 @@ func (this *Stream) Write(b []byte) (n int, err error) {
 	sentb := b
 	blen := len(sentb)
 	for n < blen {
-		this.writeLock.Lock()
-		wSize := streamWindowSize - this.waitConfirm
+		wSize := streamWindowSize - atomic.LoadUint32(&this.waitConfirm)
 		if wSize <= 0 {
-			this.writeLock.Unlock()
 			select {
 			case <-this.chWriteEvent:
 			case <-this.chFin:
@@ -191,21 +187,17 @@ func (this *Stream) Write(b []byte) (n int, err error) {
 			}
 			sendn, err := this.sess.write(newHeader(cmdPSH, this.streamID, uint32(sz)), sentb[n:n+sz])
 			if err != nil {
-				this.writeLock.Unlock()
 				return n, err
 			}
-			this.waitConfirm += uint32(sendn)
+			atomic.AddUint32(&this.waitConfirm, uint32(sendn))
 			n += sendn
-			this.writeLock.Unlock()
 		}
 	}
 	return
 }
 
 func (this *Stream) bytesConfirm(count uint32) {
-	this.writeLock.Lock()
-	this.waitConfirm -= count
-	this.writeLock.Unlock()
+	atomic.AddUint32(&this.waitConfirm, -count)
 	notifyEvent(this.chWriteEvent)
 }
 

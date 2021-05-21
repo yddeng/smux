@@ -10,7 +10,7 @@ import (
 type Session struct {
 	conn *net.TCPConn
 
-	nextStreamID     uint32 // next stream identifier
+	nextStreamID     uint32
 	nextStreamIDLock sync.Mutex
 
 	streams    map[uint32]*Stream
