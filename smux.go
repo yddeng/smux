@@ -2,7 +2,6 @@ package smux
 
 import (
 	"errors"
-	"io"
 	"net"
 	"time"
 )

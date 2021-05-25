@@ -223,6 +223,7 @@ func (this *Session) doWrite(req *writeRequest) <-chan *writeResult {
 	return retch
 }
 
+// 仅返回写入的数据长度
 func (this *Session) writeData(sid uint32, b []byte, deadline <-chan time.Time) (n int, err error) {
 	req := &writeRequest{sid: sid, b: b, doing: 0}
 

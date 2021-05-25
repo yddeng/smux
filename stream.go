@@ -17,6 +17,7 @@ type Stream struct {
 	bufferRead uint32
 	buffer     *Buffer
 	bufferLock sync.Mutex
+	readLock   sync.Mutex
 
 	// notify a read/write event
 	chReadEvent  chan struct{}
@@ -25,8 +26,6 @@ type Stream struct {
 	// 已发送待确认的字节数
 	waitConfirm uint32
 	writeLock   sync.Mutex
-
-	readLock sync.Mutex
 
 	// deadlines
 	readDeadline  atomic.Value
