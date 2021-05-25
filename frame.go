@@ -49,7 +49,8 @@ var headerGroup = sync.Pool{
 }
 
 func newHeader(cmd byte, sid uint32, len uint32) []byte {
-	hdr := headerGroup.Get().([]byte)
+	//hdr := headerGroup.Get().([]byte)
+	hdr := make([]byte, headerSize)
 	hdr[0] = cmd
 	binary.LittleEndian.PutUint32(hdr[1:], sid)
 	binary.LittleEndian.PutUint32(hdr[5:], len)

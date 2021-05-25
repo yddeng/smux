@@ -24,6 +24,9 @@ type Stream struct {
 
 	// 已发送待确认的字节数
 	waitConfirm uint32
+	writeLock   sync.Mutex
+
+	readLock sync.Mutex
 
 	// deadlines
 	readDeadline  atomic.Value
@@ -66,6 +69,9 @@ func (this *Stream) Read(b []byte) (n int, err error) {
 	default:
 	}
 
+	this.readLock.Lock()
+	defer this.readLock.Unlock()
+
 	for {
 		if n, err = this.tryRead(b); err != nil {
 			return 0, err
@@ -93,7 +99,7 @@ func (this *Stream) tryRead(b []byte) (n int, err error) {
 		n, err = this.buffer.Read(b)
 		this.bufferRead += uint32(n)
 		if this.bufferRead >= streamWindowSize/2 {
-			this.sess.write(newHeader(cmdCFM, this.streamID, this.bufferRead), nil)
+			this.sess.writeHeader(cmdCFM, this.streamID, this.bufferRead)
 			this.bufferRead = 0
 		}
 		return
@@ -153,6 +159,9 @@ func (this *Stream) Write(b []byte) (n int, err error) {
 	default:
 	}
 
+	this.writeLock.Lock()
+	defer this.writeLock.Unlock()
+
 	var timer *time.Timer
 	var deadline <-chan time.Time
 	if d, ok := this.writeDeadline.Load().(time.Time); ok && !d.IsZero() {
@@ -185,12 +194,16 @@ func (this *Stream) Write(b []byte) (n int, err error) {
 			if sz > frameSize {
 				sz = frameSize
 			}
-			sendn, err := this.sess.write(newHeader(cmdPSH, this.streamID, uint32(sz)), sentb[n:n+sz])
+
+			sendn, err := this.sess.writeData(this.streamID, sentb[n:n+sz], deadline)
+			if sendn > 0 {
+				atomic.AddUint32(&this.waitConfirm, uint32(sendn))
+				n += sendn
+			}
 			if err != nil {
 				return n, err
 			}
-			atomic.AddUint32(&this.waitConfirm, uint32(sendn))
-			n += sendn
+
 		}
 	}
 	return

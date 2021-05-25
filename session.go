@@ -5,6 +5,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 type Session struct {
@@ -75,7 +76,7 @@ func (this *Session) Open() (*Stream, error) {
 	this.streams[sid] = s
 	this.streamLock.Unlock()
 
-	this.write(newHeader(cmdSYN, sid, 0), nil)
+	this.writeHeader(cmdSYN, sid, 0)
 	return s, nil
 }
 
@@ -100,7 +101,7 @@ func (this *Session) Close() error {
 		this.streamLock.Lock()
 		for sid := range this.streams {
 			this.streams[sid].fin()
-			_, _ = this.write(newHeader(cmdFIN, sid, 0), nil)
+			this.writeHeader(cmdFIN, sid, 0)
 		}
 		this.streamLock.Unlock()
 		return this.conn.Close()
@@ -183,29 +184,80 @@ func (this *Session) readLoop() {
 	}
 }
 
-func (this *Session) write(h []byte, b []byte) (n int, err error) {
-	defer putHeader(h)
+type writeResult struct {
+	n   int
+	err error
+}
+
+type writeRequest struct {
+	sid   uint32
+	b     []byte
+	doing int32
+}
+
+func (this *Session) doWrite(req *writeRequest) <-chan *writeResult {
+	this.writeLock.Lock()
+	defer this.writeLock.Unlock()
+
+	retch := make(chan *writeResult, 1)
+	if !atomic.CompareAndSwapInt32(&req.doing, 0, 1) {
+		// 已经超时返回，不再执行
+		return retch
+	}
+
+	// 已经获取了锁，本次数据必定发往对端（tcp无错）
+
+	_, err := this.conn.Write(newHeader(cmdPSH, req.sid, uint32(len(req.b))))
+	if err != nil {
+		retch <- &writeResult{err: err}
+		return retch
+	}
+
+	n, err := this.conn.Write(req.b)
+	if err != nil {
+		retch <- &writeResult{n: n, err: err}
+		return retch
+	}
+
+	retch <- &writeResult{n: n}
+	return retch
+}
+
+func (this *Session) writeData(sid uint32, b []byte, deadline <-chan time.Time) (n int, err error) {
+	req := &writeRequest{sid: sid, b: b, doing: 0}
+
 	select {
 	case <-this.chClose:
 		return 0, ErrClosedPipe
 	case <-this.chSocketWriteError:
 		return 0, this.socketWriteError.Load().(error)
+	case <-deadline:
+		if atomic.CompareAndSwapInt32(&req.doing, 0, 1) {
+			return 0, ErrTimeout
+		} else {
+			return len(b), ErrTimeout
+		}
+	case ret := <-this.doWrite(req):
+		if ret.err != nil {
+			this.notifyWriteError(err)
+		}
+		return ret.n, ret.err
+	}
+}
+
+func (this *Session) writeHeader(cmd byte, sid uint32, length uint32) {
+	this.writeLock.Lock()
+	defer this.writeLock.Unlock()
+	select {
+	case <-this.chClose:
+		return
+	case <-this.chSocketWriteError:
+		return
 	default:
-		this.writeLock.Lock()
-		defer this.writeLock.Unlock()
-		_, err = this.conn.Write(h)
+		_, err := this.conn.Write(newHeader(cmd, sid, length))
 		if err != nil {
 			this.notifyWriteError(err)
-			return
 		}
-		if b != nil && len(b) != 0 {
-			n, err = this.conn.Write(b)
-			if err != nil {
-				this.notifyWriteError(err)
-				return
-			}
-		}
-		return
 	}
 }
 
@@ -213,7 +265,7 @@ func (this *Session) closedStream(sid uint32) {
 	this.streamLock.Lock()
 	defer this.streamLock.Unlock()
 	if _, ok := this.streams[sid]; ok {
-		_, _ = this.write(newHeader(cmdFIN, sid, 0), nil)
+		this.writeHeader(cmdFIN, sid, 0)
 		delete(this.streams, sid)
 	}
 }
