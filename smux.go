@@ -10,10 +10,11 @@ import (
 )
 
 var (
-	ErrInvalidCmd = errors.New("invalid command")
-	ErrTimeout    = errors.New("timeout")
-	ErrClosedPipe = errors.New("read/write on closed pipe")
-	ErrBrokenPipe = errors.New("broken pipe")
+	ErrInvalidCmd = errors.New("invalid command. ")
+	ErrTimeout    = errors.New("timeout. ")
+	ErrClosedPipe = errors.New("read/write on closed pipe. ")
+	ErrBrokenPipe = errors.New("broken pipe. ")
+	ErrNoSmux     = errors.New("remote connection is't smux. ")
 )
 
 func notifyEvent(ch chan struct{}) {
@@ -71,7 +72,11 @@ func Listen(address string, callback func(session *Session)) error {
 			}
 		}
 
-		callback(Server(conn))
+		if IsSmux(conn) {
+			callback(Server(conn))
+		} else {
+			conn.Close()
+		}
 	}
 }
 
@@ -79,6 +84,10 @@ func Dial(address string) (*Session, error) {
 	conn, err := net.Dial("tcp", address)
 	if err != nil {
 		return nil, err
+	}
+	if !IsSmux(conn) {
+		conn.Close()
+		return nil, ErrNoSmux
 	}
 	return Client(conn), nil
 }
