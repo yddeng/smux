@@ -1,7 +1,6 @@
 package smux
 
 import (
-	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -25,7 +24,7 @@ func listen(addr string, f func(session *Session)) {
 
 var ch = make(chan struct{})
 
-func handle(s *Stream) {
+func handle(s *Stream, t *testing.T) {
 	go func() {
 		<-ch
 		b := make([]byte, 64*1024)
@@ -33,29 +32,29 @@ func handle(s *Stream) {
 		for {
 			n, err := s.Read(b)
 			if err != nil {
-				fmt.Println("s2", err)
+				t.Log("s2", err)
 				break
 			}
 			sum += n
-			fmt.Println("s2 read", s.StreamID(), n)
+			t.Log("s2 read", s.StreamID(), n)
 		}
 
-		fmt.Println("s2 read all length", sum)
+		t.Log("s2 read all length", sum)
 	}()
 }
 
 func TestFullSend(t *testing.T) {
 	addr := "127.0.0.1:4562"
 	go listen(addr, func(session *Session) {
-		fmt.Println("new session")
+		t.Log("new session")
 		go func() {
 			for {
 				s, err := session.Accept()
 				if err != nil {
 					panic(err)
 				}
-				fmt.Println("new stream", s.StreamID())
-				handle(s)
+				t.Log("new stream", s.StreamID())
+				handle(s, t)
 			}
 		}()
 	})
@@ -73,25 +72,53 @@ func TestFullSend(t *testing.T) {
 		panic(err)
 	}
 
-	fmt.Println("s1", stream.StreamID())
+	t.Log("s1", stream.StreamID())
 
 	data := make([]byte, 64*1024)
 	sum := 0
 	for {
 		stream.SetWriteDeadline(time.Now().Add(time.Second))
 		n, err := stream.Write(data)
-		fmt.Println("s1 write", n, err)
+		t.Log("s1 write", n, err)
 		sum += n
 		if err != nil {
 			break
 		}
 	}
 
-	fmt.Println("fullWrite", sum)
+	t.Log("fullWrite", sum)
 	close(ch)
 	stream.SetWriteDeadline(time.Time{})
 	stream.Close()
 
 	time.Sleep(time.Second * 5)
 
+}
+
+func TestIsSmux(t *testing.T) {
+
+	addr := "127.0.0.1:4562"
+	go listen(addr, func(session *Session) {
+		t.Log("new session")
+		go func() {
+			for {
+				s, err := session.Accept()
+				if err != nil {
+					panic(err)
+				}
+				t.Log("new stream", s.StreamID())
+				handle(s, t)
+			}
+		}()
+	})
+
+	time.Sleep(time.Second)
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		panic(err)
+	}
+
+	b := IsSmux(conn)
+	t.Log("remote connection is smux", b)
 }

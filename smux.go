@@ -2,6 +2,9 @@ package smux
 
 import (
 	"errors"
+	"fmt"
+	"io"
+	"math/rand"
 	"net"
 	"time"
 )
@@ -18,6 +21,29 @@ func notifyEvent(ch chan struct{}) {
 	case ch <- struct{}{}:
 	default:
 	}
+}
+
+// 判断对端是否是多路复用
+func IsSmux(conn net.Conn) bool {
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	v1, v2 := r.Uint32(), r.Uint32()
+	v11, v22 := verifyCode(v1, v2)
+
+	n, err := conn.Write(newHeader(cmdVRM, v1, v2))
+	if err != nil || n != headerSize {
+		panic(fmt.Sprintf("n:%d ,err: %s", n, err))
+	}
+
+	var hdr header
+	n, err = io.ReadFull(conn, hdr[:])
+	if err != nil || n != headerSize {
+		panic(fmt.Sprintf("n:%d ,err: %s", n, err))
+	}
+
+	if hdr.Cmd() != cmdVRM || hdr.StreamID() != v11 || hdr.Length() != v22 {
+		return false
+	}
+	return true
 }
 
 func Server(conn net.Conn) *Session {

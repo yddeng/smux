@@ -173,6 +173,9 @@ func (this *Session) readLoop() {
 					stream.bytesConfirm(length)
 				}
 				this.streamLock.Unlock()
+			case cmdVRM:
+				v11, v22 := verifyCode(sid, length)
+				this.writeHeader(cmdVRM, v11, v22)
 			default:
 				this.notifyReadError(ErrInvalidCmd)
 				return
