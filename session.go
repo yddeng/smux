@@ -210,19 +210,20 @@ func (this *Session) doWrite(req *writeRequest) <-chan *writeResult {
 
 	// 已经获取了锁，本次数据必定发往对端（tcp无错）
 
-	_, err := this.conn.Write(newHeader(cmdPSH, req.sid, uint32(len(req.b))))
-	if err != nil {
-		retch <- &writeResult{err: err}
-		return retch
+	/*
+		不将超时设置到conn上，可能情况:
+		header 写入完成，data 超时。导致对端拆包出错。
+	*/
+
+	ret := new(writeResult)
+	if _, ret.err = this.conn.Write(newHeader(cmdPSH, req.sid, uint32(len(req.b)))); ret.err == nil {
+		ret.n, ret.err = this.conn.Write(req.b)
 	}
 
-	n, err := this.conn.Write(req.b)
-	if err != nil {
-		retch <- &writeResult{n: n, err: err}
-		return retch
+	if ret.err != nil {
+		this.notifyWriteError(ret.err)
 	}
-
-	retch <- &writeResult{n: n}
+	retch <- ret
 	return retch
 }
 
@@ -242,9 +243,6 @@ func (this *Session) writeData(sid uint32, b []byte, deadline <-chan time.Time) 
 			return len(b), ErrTimeout
 		}
 	case ret := <-this.doWrite(req):
-		if ret.err != nil {
-			this.notifyWriteError(err)
-		}
 		return ret.n, ret.err
 	}
 }

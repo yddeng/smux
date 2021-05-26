@@ -46,3 +46,58 @@ func verifyCode(v1, v2 uint32) (uint32, uint32) {
 	return v11, v22
 }
 ```
+
+## Usage
+
+```go
+
+func client() {
+    // Get a TCP connection
+    conn, err := net.Dial(...)
+    if err != nil {
+        panic(err)
+    }
+
+    // Setup client side of smux
+    session, err := smux.Client(conn, nil)
+    if err != nil {
+        panic(err)
+    }
+
+    // Open a new stream
+    stream, err := session.OpenStream()
+    if err != nil {
+        panic(err)
+    }
+
+    // Stream implements io.ReadWriteCloser
+    stream.Write([]byte("ping"))
+    stream.Close()
+    session.Close()
+}
+
+func server() {
+    // Accept a TCP connection
+    conn, err := listener.Accept()
+    if err != nil {
+        panic(err)
+    }
+
+    // Setup server side of smux
+    session, err := smux.Server(conn, nil)
+    if err != nil {
+        panic(err)
+    }
+
+    // Accept a stream
+    stream, err := session.AcceptStream()
+    if err != nil {
+        panic(err)
+    }
+
+    // Listen for a message
+    buf := make([]byte, 4)
+    stream.Read(buf)
+    stream.Close()
+    session.Close()
+}
