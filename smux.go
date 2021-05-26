@@ -2,7 +2,6 @@ package smux
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"math/rand"
 	"net"
@@ -30,15 +29,23 @@ func IsSmux(conn net.Conn) bool {
 	v1, v2 := r.Uint32(), r.Uint32()
 	v11, v22 := verifyCode(v1, v2)
 
-	n, err := conn.Write(newHeader(cmdVRM, v1, v2))
-	if err != nil || n != headerSize {
-		panic(fmt.Sprintf("n:%d ,err: %s", n, err))
+	conn.SetWriteDeadline(time.Now().Add(time.Second * 5))
+	defer conn.SetWriteDeadline(time.Time{})
+	_, err := conn.Write(newHeader(cmdVRM, v1, v2))
+	if err != nil {
+		panic(err)
 	}
 
+	conn.SetReadDeadline(time.Now().Add(time.Second * 5))
+	defer conn.SetReadDeadline(time.Time{})
 	var hdr header
-	n, err = io.ReadFull(conn, hdr[:])
-	if err != nil || n != headerSize {
-		panic(fmt.Sprintf("n:%d ,err: %s", n, err))
+	_, err = io.ReadFull(conn, hdr[:])
+	if err != nil {
+		if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			return false
+		} else {
+			panic(err)
+		}
 	}
 
 	if hdr.Cmd() != cmdVRM || hdr.StreamID() != v11 || hdr.Length() != v22 {
@@ -72,11 +79,7 @@ func Listen(address string, callback func(session *Session)) error {
 			}
 		}
 
-		if IsSmux(conn) {
-			callback(Server(conn))
-		} else {
-			conn.Close()
-		}
+		callback(Server(conn))
 	}
 }
 
