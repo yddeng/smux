@@ -66,6 +66,15 @@ func (this *Session) Accept() (*Stream, error) {
 }
 
 func (this *Session) Open() (*Stream, error) {
+
+	select {
+	case <-this.chClose:
+		return nil, ErrClosedPipe
+	case <-this.chSocketWriteError:
+		return nil, this.socketWriteError.Load().(error)
+	default:
+	}
+
 	this.nextStreamIDLock.Lock()
 	sid := this.nextStreamID
 	this.nextStreamID += 2
@@ -87,6 +96,17 @@ func (this *Session) IsClosed() bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func (this *Session) NumStream() int {
+	select {
+	case <-this.chClose:
+		return 0
+	default:
+		this.streamLock.Lock()
+		defer this.streamLock.Unlock()
+		return len(this.streams)
 	}
 }
 
