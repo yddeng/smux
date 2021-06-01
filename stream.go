@@ -12,7 +12,7 @@ const streamWindowSize = 512 * 1024
 
 type Stream struct {
 	sess     *Session
-	streamID uint32
+	streamID uint16
 
 	bufferRead uint32
 	buffer     *Buffer
@@ -40,7 +40,7 @@ type Stream struct {
 	finOnce sync.Once
 }
 
-func newStream(sid uint32, sess *Session) *Stream {
+func newStream(sid uint16, sess *Session) *Stream {
 	return &Stream{
 		sess:          sess,
 		streamID:      sid,
@@ -57,7 +57,7 @@ func newStream(sid uint32, sess *Session) *Stream {
 	}
 }
 
-func (this *Stream) StreamID() uint32 {
+func (this *Stream) StreamID() uint16 {
 	return this.streamID
 }
 

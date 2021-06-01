@@ -23,7 +23,7 @@ const (
 
 const (
 	sizeOfCmd  = 1
-	sizeOfSid  = 4
+	sizeOfSid  = 2
 	sizeOfLen  = 4
 	headerSize = sizeOfCmd + sizeOfSid + sizeOfLen
 )
@@ -36,12 +36,12 @@ func (h header) Cmd() byte {
 	return h[0]
 }
 
-func (h header) StreamID() uint32 {
-	return binary.LittleEndian.Uint32(h[1:])
+func (h header) StreamID() uint16 {
+	return binary.LittleEndian.Uint16(h[1:])
 }
 
 func (h header) Length() uint32 {
-	return binary.LittleEndian.Uint32(h[5:])
+	return binary.LittleEndian.Uint32(h[3:])
 }
 
 var headerGroup = sync.Pool{
@@ -50,12 +50,12 @@ var headerGroup = sync.Pool{
 	},
 }
 
-func newHeader(cmd byte, sid uint32, len uint32) []byte {
+func newHeader(cmd byte, sid uint16, len uint32) []byte {
 	//hdr := headerGroup.Get().([]byte)
 	hdr := make([]byte, headerSize)
 	hdr[0] = cmd
-	binary.LittleEndian.PutUint32(hdr[1:], sid)
-	binary.LittleEndian.PutUint32(hdr[5:], len)
+	binary.LittleEndian.PutUint16(hdr[1:], sid)
+	binary.LittleEndian.PutUint32(hdr[3:], len)
 	return hdr
 }
 
@@ -64,12 +64,12 @@ func putHeader(h []byte) {
 }
 
 /*
-	v1:uint32, v2:uint32。分4个8位(b1,b2,b3,b4)
-	v1 : (b1,b2,b3,b4) -> (b3,b4,b2,b1)
-	v2 : (b1,b2,b3,b4) -> (b1,b4,b2,b3)
+	v1:uint16, v2:uint32。
+	v1 分4个4位(b1,b2,b3,b4): (b1,b2,b3,b4) -> (b3,b4,b2,b1)
+	v2 分4个8位(b1,b2,b3,b4): (b1,b2,b3,b4) -> (b1,b4,b2,b3)
 */
-func verifyCode(v1, v2 uint32) (uint32, uint32) {
-	v11 := ((v1 & 0xFFFF) << 16) | ((v1 & 0xFF000000) >> 24) | ((v1 & 0xFF0000) >> 8)
+func verifyCode(v1 uint16, v2 uint32) (uint16, uint32) {
+	v11 := ((v1 & 0xFF) << 8) | ((v1 & 0xF000) >> 16) | ((v1 & 0xF00) >> 4)
 	v22 := (v2 & 0xFF000000) | ((v2 & 0xFF0000) >> 8) | ((v2 & 0xFF00) >> 8) | ((v2 & 0xFF) << 16)
 	return v11, v22
 }

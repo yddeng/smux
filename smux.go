@@ -24,19 +24,20 @@ func notifyEvent(ch chan struct{}) {
 }
 
 // 判断对端是否是多路复用
-func IsSmux(conn net.Conn) bool {
+func IsSmux(conn net.Conn, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	v1, v2 := r.Uint32(), r.Uint32()
+	v1, v2 := uint16(r.Uint32()%65535), r.Uint32()
 	v11, v22 := verifyCode(v1, v2)
 
-	conn.SetWriteDeadline(time.Now().Add(time.Second * 5))
+	conn.SetWriteDeadline(deadline)
 	defer conn.SetWriteDeadline(time.Time{})
 	_, err := conn.Write(newHeader(cmdVRM, v1, v2))
 	if err != nil {
 		panic(err)
 	}
 
-	conn.SetReadDeadline(time.Now().Add(time.Second * 5))
+	conn.SetReadDeadline(deadline)
 	defer conn.SetReadDeadline(time.Time{})
 	var hdr header
 	_, err = io.ReadFull(conn, hdr[:])
@@ -54,12 +55,8 @@ func IsSmux(conn net.Conn) bool {
 	return true
 }
 
-func Server(conn net.Conn) *Session {
-	return newSession(conn, 1)
-}
-
-func Client(conn net.Conn) *Session {
-	return newSession(conn, 2)
+func NewSession(conn net.Conn) *Session {
+	return newSession(conn)
 }
 
 func Listen(address string, callback func(session *Session)) error {
@@ -79,7 +76,7 @@ func Listen(address string, callback func(session *Session)) error {
 			}
 		}
 
-		callback(Server(conn))
+		callback(NewSession(conn))
 	}
 }
 
@@ -88,9 +85,5 @@ func Dial(address string) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !IsSmux(conn) {
-		conn.Close()
-		return nil, ErrNoSmux
-	}
-	return Client(conn), nil
+	return NewSession(conn), nil
 }

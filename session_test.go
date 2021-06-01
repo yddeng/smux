@@ -29,7 +29,7 @@ func setupServer(tb testing.TB) (addr string, stopfunc func(), client net.Conn, 
 }
 
 func handleConnection(conn net.Conn) {
-	session := Server(conn.(*net.TCPConn))
+	session := NewSession(conn.(*net.TCPConn))
 	for {
 		if stream, err := session.Accept(); err == nil {
 			go func(s *Stream) {
@@ -58,7 +58,7 @@ func TestSpeed(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer stop()
-	session := Client(cli.(*net.TCPConn))
+	session := NewSession(cli.(*net.TCPConn))
 	stream, _ := session.Open()
 	t.Log(stream.LocalAddr(), stream.RemoteAddr())
 

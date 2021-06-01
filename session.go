@@ -9,12 +9,11 @@ import (
 )
 
 type Session struct {
-	conn net.Conn
+	conn    net.Conn
+	idAlloc *idBitmap
 
-	nextStreamID     uint32
-	nextStreamIDLock sync.Mutex
-
-	streams    map[uint32]*Stream
+	streams    map[uint16]*Stream
+	waitFin    map[uint16]struct{}
 	streamLock sync.Mutex
 
 	chAccepts chan *Stream
@@ -32,12 +31,12 @@ type Session struct {
 	writeLock sync.Mutex
 }
 
-func newSession(conn net.Conn, netStreamID uint32) *Session {
+func newSession(conn net.Conn) *Session {
 	sess := &Session{
 		conn:                 conn,
-		nextStreamID:         netStreamID,
-		nextStreamIDLock:     sync.Mutex{},
-		streams:              map[uint32]*Stream{},
+		idAlloc:              NewIDBitmap(),
+		streams:              map[uint16]*Stream{},
+		waitFin:              map[uint16]struct{}{},
 		streamLock:           sync.Mutex{},
 		chAccepts:            make(chan *Stream, 1024),
 		socketReadError:      atomic.Value{},
@@ -49,7 +48,7 @@ func newSession(conn net.Conn, netStreamID uint32) *Session {
 		chClose:              make(chan struct{}),
 		closeOnce:            sync.Once{},
 	}
-
+	sess.idAlloc.Set(0) // use 0
 	go sess.readLoop()
 	return sess
 }
@@ -75,15 +74,16 @@ func (this *Session) Open() (*Stream, error) {
 	default:
 	}
 
-	this.nextStreamIDLock.Lock()
-	sid := this.nextStreamID
-	this.nextStreamID += 2
-	this.nextStreamIDLock.Unlock()
-	s := newStream(sid, this)
-
 	this.streamLock.Lock()
+	defer this.streamLock.Unlock()
+
+	sid, err := this.idAlloc.Get()
+	if err != nil {
+		return nil, err
+	}
+
+	s := newStream(sid, this)
 	this.streams[sid] = s
-	this.streamLock.Unlock()
 
 	this.writeHeader(cmdSYN, sid, 0)
 	return s, nil
@@ -159,6 +159,7 @@ func (this *Session) readLoop() {
 			case cmdSYN:
 				this.streamLock.Lock()
 				if _, ok := this.streams[sid]; !ok {
+					this.idAlloc.Set(sid)
 					stream := newStream(sid, this)
 					this.streams[sid] = stream
 					select {
@@ -169,9 +170,19 @@ func (this *Session) readLoop() {
 				this.streamLock.Unlock()
 			case cmdFIN:
 				this.streamLock.Lock()
-				if stream, ok := this.streams[sid]; ok {
+				if _, ok := this.waitFin[sid]; ok {
+					/*
+					 1. A端关闭，B端执行stream.fin()后返回fin。
+					 2. 两端同时关闭，本端fin还未到达对端，就收到对端的fin。
+					*/
+					this.idAlloc.Put(sid)
+					delete(this.streams, sid)
+					delete(this.waitFin, sid)
+				} else if stream, ok := this.streams[sid]; ok {
+					// 对端关闭
 					stream.fin()
 					delete(this.streams, sid)
+					this.writeHeader(cmdFIN, sid, 0)
 				}
 				this.streamLock.Unlock()
 			case cmdPSH:
@@ -213,7 +224,7 @@ type writeResult struct {
 }
 
 type writeRequest struct {
-	sid   uint32
+	sid   uint16
 	b     []byte
 	doing int32
 }
@@ -248,7 +259,7 @@ func (this *Session) doWrite(req *writeRequest) <-chan *writeResult {
 }
 
 // 仅返回写入的数据长度
-func (this *Session) writeData(sid uint32, b []byte, deadline <-chan time.Time) (n int, err error) {
+func (this *Session) writeData(sid uint16, b []byte, deadline <-chan time.Time) (n int, err error) {
 	req := &writeRequest{sid: sid, b: b, doing: 0}
 
 	select {
@@ -267,7 +278,7 @@ func (this *Session) writeData(sid uint32, b []byte, deadline <-chan time.Time) 
 	}
 }
 
-func (this *Session) writeHeader(cmd byte, sid uint32, length uint32) {
+func (this *Session) writeHeader(cmd byte, sid uint16, length uint32) {
 	this.writeLock.Lock()
 	defer this.writeLock.Unlock()
 	select {
@@ -283,11 +294,11 @@ func (this *Session) writeHeader(cmd byte, sid uint32, length uint32) {
 	}
 }
 
-func (this *Session) closedStream(sid uint32) {
+func (this *Session) closedStream(sid uint16) {
 	this.streamLock.Lock()
 	defer this.streamLock.Unlock()
 	if _, ok := this.streams[sid]; ok {
+		this.waitFin[sid] = struct{}{}
 		this.writeHeader(cmdFIN, sid, 0)
-		delete(this.streams, sid)
 	}
 }

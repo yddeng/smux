@@ -18,7 +18,7 @@ func listen(addr string, f func(session *Session)) {
 			panic(err)
 		}
 
-		f(Server(conn.(*net.TCPConn)))
+		f(NewSession(conn.(*net.TCPConn)))
 	}
 }
 
@@ -36,7 +36,7 @@ func handle(s *Stream, t *testing.T) {
 				break
 			}
 			sum += n
-			t.Log("s2 read", s.StreamID(), n)
+			//t.Log("s2 read", s.StreamID(), n)
 		}
 
 		t.Log("s2 read all length", sum)
@@ -66,7 +66,7 @@ func TestFullSend(t *testing.T) {
 		panic(err)
 	}
 
-	s := Client(conn.(*net.TCPConn))
+	s := NewSession(conn.(*net.TCPConn))
 	stream, err := s.Open()
 	if err != nil {
 		panic(err)
@@ -95,6 +95,67 @@ func TestFullSend(t *testing.T) {
 
 }
 
+func TestStream_Open(t *testing.T) {
+	addr := "127.0.0.1:4562"
+
+	go listen(addr, func(s *Session) {
+		t.Log("new session")
+		go func() {
+			for {
+				stream, err := s.Accept()
+				if err != nil {
+					panic(err)
+				}
+				t.Log("new stream", stream.StreamID())
+				handle(stream, t)
+			}
+		}()
+
+		go func() {
+			for {
+				stream, err := s.Open()
+				if err != nil {
+					t.Log(err)
+					break
+				}
+				t.Log("open ", stream.StreamID())
+				stream.Write([]byte{1, 2, 3, 4})
+				time.Sleep(time.Millisecond)
+			}
+		}()
+	})
+	time.Sleep(time.Second)
+	close(ch)
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		panic(err)
+	}
+
+	s := NewSession(conn)
+	go func() {
+		for {
+			stream, err := s.Accept()
+			if err != nil {
+				panic(err)
+			}
+			t.Log("new stream", stream.StreamID())
+			handle(stream, t)
+		}
+	}()
+
+	for {
+		stream, err := s.Open()
+		if err != nil {
+			t.Log(err)
+			break
+		}
+		stream.Write([]byte{1, 2, 3, 4})
+	}
+
+	time.Sleep(time.Second)
+}
+
 func TestIsSmux(t *testing.T) {
 
 	addr := "127.0.0.1:4562"
@@ -119,6 +180,6 @@ func TestIsSmux(t *testing.T) {
 		panic(err)
 	}
 
-	b := IsSmux(conn)
+	b := IsSmux(conn, time.Second*5)
 	t.Log("remote connection is smux", b)
 }
