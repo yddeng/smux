@@ -55,7 +55,7 @@ func IsSmux(conn net.Conn, timeout time.Duration) bool {
 	return true
 }
 
-func NewSession(conn net.Conn) *Session {
+func SmuxSession(conn net.Conn) *Session {
 	return newSession(conn)
 }
 
@@ -76,7 +76,7 @@ func Listen(address string, callback func(session *Session)) error {
 			}
 		}
 
-		callback(NewSession(conn))
+		callback(SmuxSession(conn))
 	}
 }
 
@@ -85,5 +85,5 @@ func Dial(address string) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewSession(conn), nil
+	return SmuxSession(conn), nil
 }

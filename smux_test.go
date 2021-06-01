@@ -18,7 +18,7 @@ func listen(addr string, f func(session *Session)) {
 			panic(err)
 		}
 
-		f(NewSession(conn.(*net.TCPConn)))
+		f(SmuxSession(conn.(*net.TCPConn)))
 	}
 }
 
@@ -66,7 +66,7 @@ func TestFullSend(t *testing.T) {
 		panic(err)
 	}
 
-	s := NewSession(conn.(*net.TCPConn))
+	s := SmuxSession(conn.(*net.TCPConn))
 	stream, err := s.Open()
 	if err != nil {
 		panic(err)
@@ -132,7 +132,7 @@ func TestStream_Open(t *testing.T) {
 		panic(err)
 	}
 
-	s := NewSession(conn)
+	s := SmuxSession(conn)
 	go func() {
 		for {
 			stream, err := s.Accept()
