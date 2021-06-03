@@ -147,3 +147,8 @@ func server() {
     stream.Close()
     session.Close()
 }
+```
+
+## example
+
+网关服务 https://github.com/yddeng/gate
