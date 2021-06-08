@@ -29,6 +29,8 @@ type Session struct {
 	closeOnce sync.Once
 
 	writeLock sync.Mutex
+
+	poller *Poller // epoll
 }
 
 func newSession(conn net.Conn) *Session {
@@ -86,6 +88,9 @@ func (this *Session) Open() (*Stream, error) {
 	this.streams[sid] = s
 
 	this.writeHeader(cmdSYN, sid, 0)
+
+	this.poller.handleEvent(s, cmdSYN) // epoll
+
 	return s, nil
 }
 
@@ -161,6 +166,7 @@ func (this *Session) readLoop() {
 				if _, ok := this.streams[sid]; !ok {
 					this.idAlloc.Set(sid)
 					stream := newStream(sid, this)
+					this.poller.handleEvent(stream, cmdSYN) // epoll
 					this.streams[sid] = stream
 					select {
 					case this.chAccepts <- stream:

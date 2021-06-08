@@ -61,6 +61,13 @@ func (this *Stream) StreamID() uint16 {
 	return this.streamID
 }
 
+// Readable returns length of read buffer
+func (this *Stream) Readable() (int, bool) {
+	this.bufferLock.Lock()
+	defer this.bufferLock.Unlock()
+	return this.buffer.Len(), !this.buffer.Empty()
+}
+
 func (this *Stream) Read(b []byte) (n int, err error) {
 	select {
 	case <-this.chClose:
@@ -149,6 +156,12 @@ func (this *Stream) pushBytes(b []byte) {
 	this.bufferLock.Unlock()
 }
 
+// Writable returns write windows
+func (this *Stream) Writable() (uint32, bool) {
+	writeWindows := streamWindowSize - atomic.LoadUint32(&this.waitConfirm)
+	return writeWindows, writeWindows <= 0
+}
+
 func (this *Stream) Write(b []byte) (n int, err error) {
 	select {
 	case <-this.chClose:
@@ -208,9 +221,10 @@ func (this *Stream) Write(b []byte) (n int, err error) {
 	return
 }
 
-func (this *Stream) bytesConfirm(count uint32) {
-	atomic.AddUint32(&this.waitConfirm, -count)
+func (this *Stream) bytesConfirm(count uint32) uint32 {
+	windows := streamWindowSize - atomic.AddUint32(&this.waitConfirm, -count)
 	notifyEvent(this.chWriteEvent)
+	return windows
 }
 
 func (this *Stream) Close() error {
