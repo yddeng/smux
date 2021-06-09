@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 var (
@@ -28,13 +29,8 @@ func init() {
 }
 
 type AIOConn struct {
-	stream *Stream
-}
-
-func newAIOConn(stream *Stream) *AIOConn {
-	return &AIOConn{
-		stream: stream,
-	}
+	stream  *Stream
+	service *AIOService
 }
 
 func (this *AIOConn) doWrite() {
@@ -43,15 +39,23 @@ func (this *AIOConn) doWrite() {
 func (this *AIOConn) doRead() {
 	taskQueue <- func() {
 		buf := make([]byte, 128)
+
 		n, err := this.stream.Read(buf)
-		fmt.Println("read", this.stream.StreamID(), n, err, buf[:n])
-		n, err = this.stream.Write(buf[:n])
-		fmt.Println("write", this.stream.StreamID(), n, err, buf[:n])
+		if err == nil {
+			n, err = this.stream.Write(buf[:n])
+		}
+
+		if err != nil {
+			fmt.Println("error", this.stream.StreamID(), err)
+			if err != N_DISABLE {
+				this.service.Unwatch(this.stream.StreamID())
+			}
+		}
 	}
 }
 
 func (this *AIOConn) onEventCallback(event Event) {
-	fmt.Println("onEventCallback", this.stream.StreamID(), event)
+	//fmt.Println("onEventCallback", this.stream.StreamID(), event)
 	if event.Readable() {
 		this.doRead()
 	}
@@ -87,8 +91,7 @@ func TestAIOService(t *testing.T) {
 
 func server(conn net.Conn, t *testing.T) {
 	session := SmuxSession(conn)
-
-	aioService = session.OpenAIOService(1)
+	aioService = OpenAIOService(session, 1)
 
 	go func() {
 		for {
@@ -99,7 +102,7 @@ func server(conn net.Conn, t *testing.T) {
 			}
 			//t.Log("stream", stream.StreamID())
 
-			aioConn := &AIOConn{stream: stream}
+			aioConn := &AIOConn{stream: stream, service: aioService}
 
 			aioLock.Lock()
 			aioConns[stream.StreamID()] = aioConn
@@ -118,7 +121,7 @@ func client(conn net.Conn, t *testing.T) {
 	wg := sync.WaitGroup{}
 
 	var count uint32 = 0
-	for i := 0; i < 100; i++ {
+	for i := 0; i < 2; i++ {
 		stream, _ := session.Open()
 		wg.Add(1)
 		data := make([]byte, 4)
@@ -147,4 +150,8 @@ func client(conn net.Conn, t *testing.T) {
 	}
 
 	wg.Wait()
+	t.Log(" --------- wait end")
+	time.Sleep(time.Second)
+	session.Close()
+	time.Sleep(time.Second * 2)
 }

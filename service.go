@@ -107,17 +107,17 @@ func (this *AIOService) isClosed() bool {
 	}
 }
 
-func (this *Session) OpenAIOService(worker int) *AIOService {
-	this.aioServiceLocker.Lock()
-	defer this.aioServiceLocker.Unlock()
+func OpenAIOService(session *Session, worker int) *AIOService {
+	session.aioServiceLocker.Lock()
+	defer session.aioServiceLocker.Unlock()
 
 	s := &AIOService{
-		session:     this,
+		session:     session,
 		fd2Callback: map[uint16]func(event Event){},
 		fdLock:      sync.RWMutex{},
 		taskQueue:   make(chan task, 1024),
 	}
-	this.aioService = s
+	session.aioService = s
 
 	if worker <= 0 {
 		worker = 1
@@ -157,6 +157,8 @@ func (this *Session) preparseCmd(fd uint16, cmd byte) {
 		event = EV_READ
 	case cmdCFM:
 		event = EV_WRITE
+	case cmdFIN:
+		event = EV_ERROR
 	default:
 		return
 	}

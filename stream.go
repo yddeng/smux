@@ -134,16 +134,18 @@ func (this *Stream) tryRead(b []byte) (n int, err error) {
 }
 
 func (this *Stream) waitRead() error {
-	if atomic.LoadUint32(&this.nonblock) == 1 {
-		return N_DISABLE
-	}
-
 	var timer *time.Timer
 	var deadline <-chan time.Time
 	if d, ok := this.readDeadline.Load().(time.Time); ok && !d.IsZero() {
 		timer = time.NewTimer(time.Until(d))
 		defer timer.Stop()
 		deadline = timer.C
+	}
+
+	var nonblockC chan struct{}
+	if atomic.LoadUint32(&this.nonblock) == 1 {
+		nonblockC = make(chan struct{}, 1)
+		nonblockC <- struct{}{}
 	}
 
 	select {
@@ -164,6 +166,9 @@ func (this *Stream) waitRead() error {
 		return ErrClosedPipe
 	case <-this.chNonblockEvent:
 		return nil
+	case <-nonblockC:
+		// 怎样降低优先级
+		return N_DISABLE
 	}
 }
 
@@ -214,12 +219,12 @@ func (this *Stream) Write(b []byte) (n int, err error) {
 	for n < blen {
 		wSize := streamWindowSize - atomic.LoadUint32(&this.waitConfirm)
 		if wSize <= 0 {
+			var nonblockC chan struct{}
 			if atomic.LoadUint32(&this.nonblock) == 1 {
-				if n == 0 {
-					err = N_DISABLE
-				}
-				return
+				nonblockC = make(chan struct{}, 1)
+				nonblockC <- struct{}{}
 			}
+
 			select {
 			case <-this.chWriteEvent:
 			case <-this.chFin:
@@ -231,6 +236,11 @@ func (this *Stream) Write(b []byte) (n int, err error) {
 			case <-this.chClose:
 				return 0, ErrClosedPipe
 			case <-this.chNonblockEvent:
+			case <-nonblockC:
+				if n == 0 {
+					err = N_DISABLE
+				}
+				return
 			}
 		} else {
 			sz := blen - n

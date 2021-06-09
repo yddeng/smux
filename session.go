@@ -133,22 +133,31 @@ func (this *Session) Close() error {
 	})
 
 	if once {
-		this.streamLock.Lock()
-		for sid := range this.streams {
-			this.streams[sid].fin()
-			this.writeHeader(cmdFIN, sid, 0)
-		}
-		this.streamLock.Unlock()
+		this.sessionClose(true)
 		return this.conn.Close()
 	} else {
 		return io.ErrClosedPipe
 	}
 }
 
+func (this *Session) sessionClose(notify bool) {
+	this.streamLock.Lock()
+	for sid := range this.streams {
+		this.streams[sid].fin()
+		this.preparseCmd(sid, cmdFIN)
+		if notify {
+			this.writeHeader(cmdFIN, sid, 0)
+		}
+	}
+	this.streams = map[uint16]*Stream{}
+	this.streamLock.Unlock()
+}
+
 func (this *Session) notifyReadError(err error) {
 	this.socketReadErrorOnce.Do(func() {
 		this.socketReadError.Store(err)
 		close(this.chSocketReadError)
+		this.sessionClose(false)
 	})
 }
 
@@ -156,6 +165,7 @@ func (this *Session) notifyWriteError(err error) {
 	this.socketWriteErrorOnce.Do(func() {
 		this.socketWriteError.Store(err)
 		close(this.chSocketWriteError)
+		this.sessionClose(false)
 	})
 }
 
@@ -198,6 +208,7 @@ func (this *Session) readLoop() {
 					stream.fin()
 					delete(this.streams, sid)
 					this.writeHeader(cmdFIN, sid, 0)
+					this.preparseCmd(sid, cmdFIN)
 				}
 				this.streamLock.Unlock()
 			case cmdPSH:
@@ -317,5 +328,6 @@ func (this *Session) closedStream(sid uint16) {
 	if _, ok := this.streams[sid]; ok {
 		this.waitFin[sid] = struct{}{}
 		this.writeHeader(cmdFIN, sid, 0)
+		this.preparseCmd(sid, cmdFIN)
 	}
 }
