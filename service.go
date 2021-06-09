@@ -4,7 +4,22 @@ import (
 	"sync"
 )
 
-type Event  
+type Event byte
+
+// Event poller 返回事件值
+const (
+	EV_READ  Event = 1 << 1
+	EV_WRITE Event = 1 << 2
+	EV_ERROR Event = 1 << 3
+)
+
+func (e Event) Readable() bool {
+	return e&EV_READ != 0 || e&EV_ERROR != 0
+}
+
+func (e Event) Writable() bool {
+	return e&EV_WRITE != 0 || e&EV_ERROR != 0
+}
 
 type AIOService struct {
 	session *Session
@@ -53,12 +68,17 @@ func (this *AIOService) trigger(fd uint16) {
 }
 
 func (this *AIOService) Watch(fd uint16, callback func(event Event)) {
-	this.fdLock.Lock()
-	defer this.fdLock.Unlock()
+	if this.isClosed() {
+		return
+	}
 
+	this.fdLock.Lock()
 	if _, ok := this.fd2Callback[fd]; !ok {
 		this.fd2Callback[fd] = callback
+		this.fdLock.Unlock()
 		this.trigger(fd)
+	} else {
+		this.fdLock.Unlock()
 	}
 }
 
@@ -97,6 +117,7 @@ func (this *Session) OpenAIOService(worker int) *AIOService {
 		fdLock:      sync.RWMutex{},
 		taskQueue:   make(chan task, 1024),
 	}
+	this.aioService = s
 
 	if worker <= 0 {
 		worker = 1
@@ -111,9 +132,11 @@ func (this *Session) OpenAIOService(worker int) *AIOService {
 					s.fdLock.Lock()
 					callback, ok := s.fd2Callback[t.fd]
 					if ok {
+						s.fdLock.Unlock()
 						callback(t.event)
+					} else {
+						s.fdLock.Unlock()
 					}
-					s.fdLock.Unlock()
 				}
 			}
 		}()

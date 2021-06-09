@@ -186,7 +186,7 @@ func (this *Stream) pushBytes(b []byte) {
 // Writable returns write windows
 func (this *Stream) Writable() (int, bool) {
 	writeWindows := streamWindowSize - atomic.LoadUint32(&this.waitConfirm)
-	return int(writeWindows), writeWindows <= 0
+	return int(writeWindows), writeWindows > 0
 }
 
 func (this *Stream) Write(b []byte) (n int, err error) {

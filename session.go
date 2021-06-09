@@ -30,7 +30,8 @@ type Session struct {
 
 	writeLock sync.Mutex
 
-	poller *Poller // epoll
+	aioService       *AIOService // epoll
+	aioServiceLocker sync.Mutex
 }
 
 func newSession(conn net.Conn) *Session {
@@ -89,8 +90,6 @@ func (this *Session) Open() (*Stream, error) {
 
 	this.writeHeader(cmdSYN, sid, 0)
 
-	this.poller.handleEvent(s, cmdSYN) // epoll
-
 	return s, nil
 }
 
@@ -112,6 +111,17 @@ func (this *Session) NumStream() int {
 		this.streamLock.Lock()
 		defer this.streamLock.Unlock()
 		return len(this.streams)
+	}
+}
+
+func (this *Session) GetStream(streamID uint16) *Stream {
+	select {
+	case <-this.chClose:
+		return nil
+	default:
+		this.streamLock.Lock()
+		defer this.streamLock.Unlock()
+		return this.streams[streamID]
 	}
 }
 
@@ -166,7 +176,6 @@ func (this *Session) readLoop() {
 				if _, ok := this.streams[sid]; !ok {
 					this.idAlloc.Set(sid)
 					stream := newStream(sid, this)
-					this.poller.handleEvent(stream, cmdSYN) // epoll
 					this.streams[sid] = stream
 					select {
 					case this.chAccepts <- stream:
@@ -197,6 +206,7 @@ func (this *Session) readLoop() {
 						this.streamLock.Lock()
 						if stream, ok := this.streams[sid]; ok {
 							stream.pushBytes(buffer[:length])
+							this.preparseCmd(stream.streamID, cmdPSH) // epoll
 						}
 						this.streamLock.Unlock()
 					} else {
@@ -208,6 +218,7 @@ func (this *Session) readLoop() {
 				this.streamLock.Lock()
 				if stream, ok := this.streams[sid]; ok {
 					stream.bytesConfirm(length)
+					this.preparseCmd(stream.streamID, cmdCFM) // epoll
 				}
 				this.streamLock.Unlock()
 			case cmdVRM:
