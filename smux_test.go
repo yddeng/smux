@@ -95,6 +95,53 @@ func TestFullSend(t *testing.T) {
 
 }
 
+func TestStream_SetNonblock(t *testing.T) {
+	addr := "127.0.0.1:4562"
+	go listen(addr, func(session *Session) {
+		t.Log("new session")
+		go func() {
+			for {
+				s, err := session.Accept()
+				if err != nil {
+					panic(err)
+				}
+				t.Log("new stream", s.StreamID())
+			}
+		}()
+	})
+
+	time.Sleep(time.Second)
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		panic(err)
+	}
+
+	s := SmuxSession(conn.(*net.TCPConn))
+	stream, err := s.Open()
+	if err != nil {
+		panic(err)
+	}
+
+	stream.SetNonblock(true)
+
+	t.Log("s1", stream.StreamID())
+
+	data := make([]byte, 64*1024)
+	sum := 0
+	for {
+		n, err := stream.Write(data)
+		t.Log("s1 write", n, err)
+		sum += n
+		if err != nil {
+			break
+		}
+	}
+
+	t.Log("fullWrite", sum)
+	stream.Close()
+}
+
 func TestStream_Open(t *testing.T) {
 	addr := "127.0.0.1:4562"
 

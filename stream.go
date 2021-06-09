@@ -1,12 +1,19 @@
 package smux
 
 import (
+	"errors"
 	"io"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
 )
+
+/*
+ 只有在非堵塞模式下才有的返回错误
+ 读情况下，没有数据可读；写情况下，不能写且已发送为0
+*/
+var N_DISABLE = errors.New("nonblock read/write disable. ")
 
 const streamWindowSize = 512 * 1024
 
@@ -38,27 +45,41 @@ type Stream struct {
 	// 被动关闭调用 fin
 	chFin   chan struct{}
 	finOnce sync.Once
+
+	nonblock        uint32 // 堵塞，默认堵塞
+	chNonblockEvent chan struct{}
 }
 
 func newStream(sid uint16, sess *Session) *Stream {
 	return &Stream{
-		sess:          sess,
-		streamID:      sid,
-		buffer:        New(streamWindowSize),
-		bufferLock:    sync.Mutex{},
-		chReadEvent:   make(chan struct{}, 1),
-		chWriteEvent:  make(chan struct{}, 1),
-		readDeadline:  atomic.Value{},
-		writeDeadline: atomic.Value{},
-		chClose:       make(chan struct{}),
-		closeOnce:     sync.Once{},
-		chFin:         make(chan struct{}),
-		finOnce:       sync.Once{},
+		sess:            sess,
+		streamID:        sid,
+		buffer:          New(streamWindowSize),
+		bufferLock:      sync.Mutex{},
+		chReadEvent:     make(chan struct{}, 1),
+		chWriteEvent:    make(chan struct{}, 1),
+		readDeadline:    atomic.Value{},
+		writeDeadline:   atomic.Value{},
+		chClose:         make(chan struct{}),
+		closeOnce:       sync.Once{},
+		chFin:           make(chan struct{}),
+		finOnce:         sync.Once{},
+		chNonblockEvent: make(chan struct{}, 1),
 	}
 }
 
 func (this *Stream) StreamID() uint16 {
 	return this.streamID
+}
+
+func (this *Stream) SetNonblock(nonblocking bool) {
+	if nonblocking {
+		if atomic.CompareAndSwapUint32(&this.nonblock, 0, 1) {
+			notifyEvent(this.chNonblockEvent)
+		}
+	} else {
+		atomic.CompareAndSwapUint32(&this.nonblock, 1, 0)
+	}
 }
 
 // Readable returns length of read buffer
@@ -113,6 +134,10 @@ func (this *Stream) tryRead(b []byte) (n int, err error) {
 }
 
 func (this *Stream) waitRead() error {
+	if atomic.LoadUint32(&this.nonblock) == 1 {
+		return N_DISABLE
+	}
+
 	var timer *time.Timer
 	var deadline <-chan time.Time
 	if d, ok := this.readDeadline.Load().(time.Time); ok && !d.IsZero() {
@@ -137,6 +162,8 @@ func (this *Stream) waitRead() error {
 		return ErrTimeout
 	case <-this.chClose:
 		return ErrClosedPipe
+	case <-this.chNonblockEvent:
+		return nil
 	}
 }
 
@@ -157,9 +184,9 @@ func (this *Stream) pushBytes(b []byte) {
 }
 
 // Writable returns write windows
-func (this *Stream) Writable() (uint32, bool) {
+func (this *Stream) Writable() (int, bool) {
 	writeWindows := streamWindowSize - atomic.LoadUint32(&this.waitConfirm)
-	return writeWindows, writeWindows <= 0
+	return int(writeWindows), writeWindows <= 0
 }
 
 func (this *Stream) Write(b []byte) (n int, err error) {
@@ -187,6 +214,12 @@ func (this *Stream) Write(b []byte) (n int, err error) {
 	for n < blen {
 		wSize := streamWindowSize - atomic.LoadUint32(&this.waitConfirm)
 		if wSize <= 0 {
+			if atomic.LoadUint32(&this.nonblock) == 1 {
+				if n == 0 {
+					err = N_DISABLE
+				}
+				return
+			}
 			select {
 			case <-this.chWriteEvent:
 			case <-this.chFin:
@@ -197,6 +230,7 @@ func (this *Stream) Write(b []byte) (n int, err error) {
 				return n, ErrTimeout
 			case <-this.chClose:
 				return 0, ErrClosedPipe
+			case <-this.chNonblockEvent:
 			}
 		} else {
 			sz := blen - n
