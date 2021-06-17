@@ -1,8 +1,8 @@
 package smux
 
 import (
+	"encoding/binary"
 	"errors"
-	"io"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -141,80 +141,90 @@ func (this *MuxSession) close(err error) {
 
 func (this *MuxSession) readLoop() {
 	var (
-		hdr    header
-		buffer = make([]byte, frameSize)
+		buffer = make([]byte, muxConnWindowSize)
+		r, w   int
 	)
 	for {
-		// read header first
-		if _, err := io.ReadFull(this.conn, hdr[:]); err == nil {
-			cmd := hdr.Cmd()
-			cid := hdr.Uint16()
-			length := hdr.Uint32()
-			switch cmd {
-			case cmdSYN:
-				this.connLock.Lock()
-				if _, ok := this.connections[cid]; !ok {
-					this.idAlloc.Set(cid)
-					conn := newMuxConn(cid, this)
-					this.connections[cid] = conn
-					select {
-					case this.chAccepts <- conn:
-					case <-this.chClose:
+		if n, err := this.conn.Read(buffer[w:]); err != nil {
+			this.close(err)
+			return
+		} else {
+			w += n
+		loop:
+			for w-r >= headerSize {
+				cmd := buffer[r]
+				cid := binary.LittleEndian.Uint16(buffer[r+1:])
+				length := binary.LittleEndian.Uint32(buffer[r+3:])
+				r += headerSize
+
+				switch cmd {
+				case cmdSYN:
+					this.connLock.Lock()
+					if _, ok := this.connections[cid]; !ok {
+						this.idAlloc.Set(cid)
+						conn := newMuxConn(cid, this)
+						this.connections[cid] = conn
+						select {
+						case this.chAccepts <- conn:
+						case <-this.chClose:
+						}
 					}
-				}
-				this.connLock.Unlock()
-			case cmdFIN:
-				this.connLock.Lock()
-				if _, ok := this.connWaitFin[cid]; ok {
-					/*
-					 1. A端关闭，B端执行conn.fin()后返回fin。
-					 2. 两端同时关闭，本端fin还未到达对端，就收到对端的fin。
-					*/
-					this.idAlloc.Put(cid)
-					delete(this.connections, cid)
-					delete(this.connWaitFin, cid)
-				} else if conn, ok := this.connections[cid]; ok {
-					// 对端关闭
-					conn.fin()
-					delete(this.connections, cid)
-					this.writeHeader(cmdFIN, cid, 0)
-					this.preparseCmd(cid, cmdFIN)
-				}
-				this.connLock.Unlock()
-			case cmdPSH:
-				if length > 0 {
-					if _, err := io.ReadFull(this.conn, buffer[:length]); err == nil {
+					this.connLock.Unlock()
+				case cmdFIN:
+					this.connLock.Lock()
+					if _, ok := this.connWaitFin[cid]; ok {
+						/*
+						 1. A端关闭，B端执行conn.fin()后返回fin。
+						 2. 两端同时关闭，本端fin还未到达对端，就收到对端的fin。
+						*/
+						this.idAlloc.Put(cid)
+						delete(this.connections, cid)
+						delete(this.connWaitFin, cid)
+					} else if conn, ok := this.connections[cid]; ok {
+						// 对端关闭
+						conn.fin()
+						delete(this.connections, cid)
+						this.writeHeader(cmdFIN, cid, 0)
+						this.preparseCmd(cid, cmdFIN)
+					}
+					this.connLock.Unlock()
+				case cmdPSH:
+					if w-r >= int(length) {
 						this.connLock.Lock()
 						if conn, ok := this.connections[cid]; ok {
-							conn.pushBytes(buffer[:length])
+							conn.pushBytes(buffer[r : r+int(length)])
 							this.preparseCmd(conn.connID, cmdPSH) // epoll
 						}
 						this.connLock.Unlock()
+						r += int(length)
 					} else {
-						this.close(err)
-						return
+						r -= headerSize
+						break loop
 					}
+				case cmdCFM:
+					this.connLock.Lock()
+					if conn, ok := this.connections[cid]; ok {
+						conn.bytesConfirm(length)
+						this.preparseCmd(conn.connID, cmdCFM) // epoll
+					}
+					this.connLock.Unlock()
+				case cmdVRM:
+					v11, v22 := verifyCode(cid, length)
+					this.writeHeader(cmdVRM, v11, v22)
+				case cmdPIN:
+					this.lastPingTime.Store(time.Now())
+				default:
+					this.close(errors.New("invalid command. "))
+					return
 				}
-			case cmdCFM:
-				this.connLock.Lock()
-				if conn, ok := this.connections[cid]; ok {
-					conn.bytesConfirm(length)
-					this.preparseCmd(conn.connID, cmdCFM) // epoll
-				}
-				this.connLock.Unlock()
-			case cmdVRM:
-				v11, v22 := verifyCode(cid, length)
-				this.writeHeader(cmdVRM, v11, v22)
-			case cmdPIN:
-				this.lastPingTime.Store(time.Now())
-			default:
-				this.close(errors.New("invalid command. "))
-				return
 			}
-		} else {
-			this.close(err)
-			return
+
+			if r != 0 {
+				w = copy(buffer[0:], buffer[r:w])
+				r = 0
+			}
 		}
+
 	}
 }
 
@@ -224,9 +234,10 @@ type writeResult struct {
 }
 
 type writeRequest struct {
-	cid   uint16
-	hdr   []byte
-	d     []byte
+	cmd   byte
+	v1    uint16
+	v2    uint32
+	b     []byte
 	doing int32
 	done  chan *writeResult
 }
@@ -248,11 +259,19 @@ func (this *MuxSession) writeLoop() {
 				header 写入完成，data 超时。导致对端拆包出错。
 			*/
 
-			ret := new(writeResult)
-			if _, ret.err = this.conn.Write(req.hdr); ret.err == nil && req.d != nil {
-				ret.n, ret.err = this.conn.Write(req.d)
+			data := make([]byte, headerSize+len(req.b))
+
+			data[0] = req.cmd
+			binary.LittleEndian.PutUint16(data[1:], req.v1)
+			binary.LittleEndian.PutUint32(data[3:], req.v2)
+
+			if len(req.b) > 0 {
+				copy(data[headerSize:], req.b)
 			}
-			putHeader(req.hdr)
+
+			ret := new(writeResult)
+			ret.n, ret.err = this.conn.Write(data)
+			ret.n -= headerSize
 
 			req.done <- ret
 			close(req.done)
@@ -290,10 +309,8 @@ func (this *MuxSession) ping() {
 // 仅返回写入的数据长度
 func (this *MuxSession) writeData(cid uint16, b []byte, deadline <-chan time.Time) (n int, err error) {
 	req := &writeRequest{
-		cid: cid, d: b,
-		hdr:   newHeader(cmdPSH, cid, uint32(len(b))),
-		doing: 0,
-		done:  make(chan *writeResult, 1),
+		cmd: cmdPSH, v1: cid, v2: uint32(len(b)),
+		b: b, done: make(chan *writeResult, 1),
 	}
 
 	select {
@@ -324,10 +341,8 @@ func (this *MuxSession) writeData(cid uint16, b []byte, deadline <-chan time.Tim
 
 func (this *MuxSession) writeHeader(cmd byte, cid uint16, length uint32) {
 	req := &writeRequest{
-		cid:   cid,
-		hdr:   newHeader(cmdPSH, cid, length),
-		doing: 0,
-		done:  make(chan *writeResult, 1),
+		cmd: cmd, v1: cid, v2: length,
+		done: make(chan *writeResult, 1),
 	}
 
 	select {

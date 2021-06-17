@@ -240,9 +240,9 @@ func setupServer(t *testing.T) (addr string, stopfunc func(), client net.Conn, e
 }
 
 func handleConnection(conn net.Conn) {
-	session := NewMuxSession(conn.(*net.TCPConn))
+	session := NewMuxSession(conn)
 	for {
-		if conn, err := session.Accept(); err == nil {
+		if s, err := session.Accept(); err == nil {
 			go func(s *MuxConn) {
 				buf := make([]byte, 65536)
 				i := 0
@@ -256,7 +256,7 @@ func handleConnection(conn net.Conn) {
 					sendn, _ := s.Write(buf[:n])
 					send += sendn
 				}
-			}(conn)
+			}(s)
 		} else {
 			return
 		}
@@ -270,8 +270,8 @@ func TestSpeed(t *testing.T) {
 	}
 	defer stop()
 	session := NewMuxSession(cli.(*net.TCPConn))
-	MuxConn, _ := session.Open()
-	t.Log(MuxConn.LocalAddr(), MuxConn.RemoteAddr())
+	conn, _ := session.Open()
+	t.Log(conn.LocalAddr(), conn.RemoteAddr())
 
 	start := time.Now()
 	var wg sync.WaitGroup
@@ -281,26 +281,31 @@ func TestSpeed(t *testing.T) {
 		nrecv := 0
 		i := 0
 		for {
-			n, err := MuxConn.Read(buf)
+			n, err := conn.Read(buf)
 			if err != nil {
 				t.Error(err)
 				break
 			} else {
 				nrecv += n
 				i++
+				//t.Log(i, nrecv)
 				if nrecv >= 4096*4096 {
 					break
 				}
 			}
 		}
-		MuxConn.Close()
+		conn.Close()
 		t.Log("time for 16MB rtt", time.Since(start))
 		wg.Done()
 	}()
 	msg := make([]byte, 8192)
+	wn := 0
 	for i := 0; i < 2048; i++ {
-		MuxConn.Write(msg)
+		n, _ := conn.Write(msg)
+		wn += n
+		//t.Log(i)
 	}
+	t.Log("write length", wn)
 	wg.Wait()
 	session.Close()
 }

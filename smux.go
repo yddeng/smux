@@ -1,6 +1,7 @@
 package smux
 
 import (
+	"encoding/binary"
 	"errors"
 	"io"
 	"math/rand"
@@ -21,26 +22,31 @@ func IsSmux(conn net.Conn, timeout time.Duration) bool {
 	v1, v2 := uint16(r.Uint32()%65535), r.Uint32()
 	v11, v22 := verifyCode(v1, v2)
 
+	hdr := make([]byte, headerSize)
+	hdr[0] = cmdVRM
+	binary.LittleEndian.PutUint16(hdr[1:], v1)
+	binary.LittleEndian.PutUint32(hdr[3:], v2)
+
 	conn.SetWriteDeadline(deadline)
-	defer conn.SetWriteDeadline(time.Time{})
-	_, err := conn.Write(newHeader(cmdVRM, v1, v2))
-	if err != nil {
+	if _, err := conn.Write(hdr); err != nil {
 		panic(err)
 	}
+	conn.SetWriteDeadline(time.Time{})
 
 	conn.SetReadDeadline(deadline)
-	defer conn.SetReadDeadline(time.Time{})
-	var hdr header
-	_, err = io.ReadFull(conn, hdr[:])
-	if err != nil {
+	if _, err := io.ReadFull(conn, hdr); err != nil {
 		if ne, ok := err.(net.Error); ok && ne.Timeout() {
 			return false
 		} else {
 			panic(err)
 		}
 	}
+	conn.SetReadDeadline(time.Time{})
 
-	if hdr.Cmd() != cmdVRM || hdr.Uint16() != v11 || hdr.Uint32() != v22 {
+	cmd := hdr[0]
+	rv1 := binary.LittleEndian.Uint16(hdr[1:])
+	rv2 := binary.LittleEndian.Uint32(hdr[3:])
+	if cmd != cmdVRM || rv1 != v11 || rv2 != v22 {
 		return false
 	}
 	return true
