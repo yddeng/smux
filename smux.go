@@ -9,11 +9,9 @@ import (
 )
 
 var (
-	ErrInvalidCmd = errors.New("invalid command. ")
 	ErrTimeout    = errors.New("timeout. ")
-	ErrClosedPipe = errors.New("read/write on closed pipe. ")
-	ErrBrokenPipe = errors.New("broken pipe. ")
-	ErrNoSmux     = errors.New("remote connection is't smux. ")
+	ErrClosedPipe = errors.New("the stream has closed. ")
+	ErrBrokenPipe = errors.New("write on closed stream. ")
 )
 
 func notifyEvent(ch chan struct{}) {

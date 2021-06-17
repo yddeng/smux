@@ -27,7 +27,7 @@ type AIOService struct {
 	fd2Callback map[uint16]func(event Event)
 	fdLock      sync.RWMutex
 
-	taskQueue chan task
+	taskQueue chan *task
 
 	die     chan struct{}
 	dieOnce sync.Once
@@ -42,10 +42,8 @@ func (this *AIOService) appendEvent(fd uint16, event Event) {
 	this.fdLock.RLock()
 	defer this.fdLock.RUnlock()
 	if _, ok := this.fd2Callback[fd]; ok {
-		this.taskQueue <- task{
-			fd:    fd,
-			event: event,
-		}
+		t := &task{fd: fd, event: event}
+		this.taskQueue <- t
 	}
 }
 
@@ -115,7 +113,7 @@ func OpenAIOService(session *Session, worker int) *AIOService {
 		session:     session,
 		fd2Callback: map[uint16]func(event Event){},
 		fdLock:      sync.RWMutex{},
-		taskQueue:   make(chan task, 1024),
+		taskQueue:   make(chan *task, 1024),
 	}
 	session.aioService = s
 

@@ -15,8 +15,6 @@ import (
 */
 var N_DISABLE = errors.New("nonblock read/write disable. ")
 
-const streamWindowSize = 512 * 1024
-
 type Stream struct {
 	sess     *Session
 	streamID uint16
@@ -158,12 +156,10 @@ func (this *Stream) waitRead() error {
 			return nil
 		}
 		return io.EOF
-	case <-this.sess.chSocketReadError:
-		return this.sess.socketReadError.Load().(error)
 	case <-deadline:
 		return ErrTimeout
 	case <-this.chClose:
-		return ErrClosedPipe
+		return this.sess.closeReason.Load().(error)
 	case <-this.chNonblockEvent:
 		return nil
 	case <-nonblockC:
@@ -229,8 +225,6 @@ func (this *Stream) Write(b []byte) (n int, err error) {
 			case <-this.chWriteEvent:
 			case <-this.chFin:
 				return 0, ErrBrokenPipe
-			case <-this.sess.chSocketWriteError:
-				return 0, this.sess.socketWriteError.Load().(error)
 			case <-deadline:
 				return n, ErrTimeout
 			case <-this.chClose:

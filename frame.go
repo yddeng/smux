@@ -3,6 +3,7 @@ package smux
 import (
 	"encoding/binary"
 	"sync"
+	"time"
 )
 
 const (
@@ -11,6 +12,7 @@ const (
 	cmdPSH             // data push
 	cmdCFM             // number bytes of confirm
 	cmdVRM             // verify remote is multiplexed
+	cmdPIN             // ping
 )
 
 /*
@@ -19,6 +21,7 @@ const (
 	cmdPSH : streamID + 推送的数据长度 + data
 	cmdCFM : streamID + 确认的数据长度
 	cmdVRM : 随机值 + 随机值
+	cmdPIN : 0 + 0
 */
 
 const (
@@ -29,6 +32,13 @@ const (
 )
 
 const frameSize = 64 * 1024
+
+const streamWindowSize = 512 * 1024
+
+const (
+	pingInterval = time.Second * 10
+	pingTimeout  = time.Second * 60
+)
 
 type header [headerSize]byte
 
@@ -51,8 +61,8 @@ var headerGroup = sync.Pool{
 }
 
 func newHeader(cmd byte, sid uint16, len uint32) []byte {
-	//hdr := headerGroup.Get().([]byte)
-	hdr := make([]byte, headerSize)
+	hdr := headerGroup.Get().([]byte)
+	//hdr := make([]byte, headerSize)
 	hdr[0] = cmd
 	binary.LittleEndian.PutUint16(hdr[1:], sid)
 	binary.LittleEndian.PutUint32(hdr[3:], len)

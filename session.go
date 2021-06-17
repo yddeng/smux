@@ -1,6 +1,7 @@
 package smux
 
 import (
+	"errors"
 	"io"
 	"net"
 	"sync"
@@ -18,17 +19,13 @@ type Session struct {
 
 	chAccepts chan *Stream
 
-	socketReadError      atomic.Value
-	socketWriteError     atomic.Value
-	chSocketReadError    chan struct{}
-	chSocketWriteError   chan struct{}
-	socketReadErrorOnce  sync.Once
-	socketWriteErrorOnce sync.Once
+	chClose     chan struct{}
+	closeOnce   sync.Once
+	closeReason atomic.Value
 
-	chClose   chan struct{}
-	closeOnce sync.Once
+	chWrite chan *writeRequest
 
-	writeLock sync.Mutex
+	lastPingTime atomic.Value // time.Time
 
 	aioService       *AIOService // epoll
 	aioServiceLocker sync.Mutex
@@ -36,23 +33,21 @@ type Session struct {
 
 func newSession(conn net.Conn) *Session {
 	sess := &Session{
-		conn:                 conn,
-		idAlloc:              NewIDBitmap(),
-		streams:              map[uint16]*Stream{},
-		waitFin:              map[uint16]struct{}{},
-		streamLock:           sync.Mutex{},
-		chAccepts:            make(chan *Stream, 1024),
-		socketReadError:      atomic.Value{},
-		socketWriteError:     atomic.Value{},
-		chSocketReadError:    make(chan struct{}),
-		chSocketWriteError:   make(chan struct{}),
-		socketReadErrorOnce:  sync.Once{},
-		socketWriteErrorOnce: sync.Once{},
-		chClose:              make(chan struct{}),
-		closeOnce:            sync.Once{},
+		conn:       conn,
+		idAlloc:    NewIDBitmap(),
+		streams:    map[uint16]*Stream{},
+		waitFin:    map[uint16]struct{}{},
+		streamLock: sync.Mutex{},
+		chAccepts:  make(chan *Stream, 1024),
+		chClose:    make(chan struct{}),
+		closeOnce:  sync.Once{},
+		chWrite:    make(chan *writeRequest),
 	}
-	sess.idAlloc.Set(0) // use 0
+	sess.lastPingTime.Store(time.Now())
+
 	go sess.readLoop()
+	go sess.writeLoop()
+	go sess.ping()
 	return sess
 }
 
@@ -60,20 +55,15 @@ func (this *Session) Accept() (*Stream, error) {
 	select {
 	case stream := <-this.chAccepts:
 		return stream, nil
-	case <-this.chSocketReadError:
-		return nil, this.socketReadError.Load().(error)
 	case <-this.chClose:
-		return nil, ErrClosedPipe
+		return nil, this.closeReason.Load().(error)
 	}
 }
 
 func (this *Session) Open() (*Stream, error) {
-
 	select {
 	case <-this.chClose:
-		return nil, ErrClosedPipe
-	case <-this.chSocketWriteError:
-		return nil, this.socketWriteError.Load().(error)
+		return nil, this.closeReason.Load().(error)
 	default:
 	}
 
@@ -125,47 +115,27 @@ func (this *Session) GetStream(streamID uint16) *Stream {
 	}
 }
 
-func (this *Session) Close() error {
-	var once bool
+func (this *Session) Addr() net.Addr {
+	return this.conn.LocalAddr()
+}
+
+func (this *Session) Close() {
+	this.close(errors.New("closed smux. "))
+}
+
+func (this *Session) close(err error) {
 	this.closeOnce.Do(func() {
+		this.closeReason.Store(err)
 		close(this.chClose)
-		once = true
-	})
+		this.conn.Close()
 
-	if once {
-		this.sessionClose(true)
-		return this.conn.Close()
-	} else {
-		return io.ErrClosedPipe
-	}
-}
-
-func (this *Session) sessionClose(notify bool) {
-	this.streamLock.Lock()
-	for sid := range this.streams {
-		this.streams[sid].fin()
-		this.preparseCmd(sid, cmdFIN)
-		if notify {
-			this.writeHeader(cmdFIN, sid, 0)
+		this.streamLock.Lock()
+		for sid := range this.streams {
+			this.streams[sid].fin()
+			this.preparseCmd(sid, cmdFIN)
 		}
-	}
-	this.streams = map[uint16]*Stream{}
-	this.streamLock.Unlock()
-}
-
-func (this *Session) notifyReadError(err error) {
-	this.socketReadErrorOnce.Do(func() {
-		this.socketReadError.Store(err)
-		close(this.chSocketReadError)
-		this.sessionClose(false)
-	})
-}
-
-func (this *Session) notifyWriteError(err error) {
-	this.socketWriteErrorOnce.Do(func() {
-		this.socketWriteError.Store(err)
-		close(this.chSocketWriteError)
-		this.sessionClose(false)
+		this.streams = map[uint16]*Stream{}
+		this.streamLock.Unlock()
 	})
 }
 
@@ -221,7 +191,7 @@ func (this *Session) readLoop() {
 						}
 						this.streamLock.Unlock()
 					} else {
-						this.notifyReadError(err)
+						this.close(err)
 						return
 					}
 				}
@@ -235,12 +205,14 @@ func (this *Session) readLoop() {
 			case cmdVRM:
 				v11, v22 := verifyCode(sid, length)
 				this.writeHeader(cmdVRM, v11, v22)
+			case cmdPIN:
+				this.lastPingTime.Store(time.Now())
 			default:
-				this.notifyReadError(ErrInvalidCmd)
+				this.close(errors.New("invalid command. "))
 				return
 			}
 		} else {
-			this.notifyReadError(err)
+			this.close(err)
 			return
 		}
 	}
@@ -253,72 +225,114 @@ type writeResult struct {
 
 type writeRequest struct {
 	sid   uint16
-	b     []byte
+	hdr   []byte
+	d     []byte
 	doing int32
+	done  chan *writeResult
 }
 
-func (this *Session) doWrite(req *writeRequest) <-chan *writeResult {
-	this.writeLock.Lock()
-	defer this.writeLock.Unlock()
+func (this *Session) writeLoop() {
+	for {
+		select {
+		case <-this.chClose:
+			return
+		case req := <-this.chWrite:
+			if !atomic.CompareAndSwapInt32(&req.doing, 0, 1) {
+				// 已经超时返回，不再执行
+				return
+			}
 
-	retch := make(chan *writeResult, 1)
-	if !atomic.CompareAndSwapInt32(&req.doing, 0, 1) {
-		// 已经超时返回，不再执行
-		return retch
+			// 本次数据必定发往对端（tcp无错）
+			/*
+				不将超时设置到conn上，可能情况:
+				header 写入完成，data 超时。导致对端拆包出错。
+			*/
+
+			ret := new(writeResult)
+			if _, ret.err = this.conn.Write(req.hdr); ret.err == nil && req.d != nil {
+				ret.n, ret.err = this.conn.Write(req.d)
+			}
+			putHeader(req.hdr)
+
+			req.done <- ret
+			close(req.done)
+
+			if ret.err != nil {
+				this.close(ret.err)
+				return
+			}
+		}
 	}
+}
 
-	// 已经获取了锁，本次数据必定发往对端（tcp无错）
+func (this *Session) ping() {
+	timer := time.NewTimer(pingInterval)
+	defer timer.Stop()
+	for {
+		select {
+		case <-this.chClose:
+			return
+		case now := <-timer.C:
+			this.writeHeader(cmdPIN, 0, 0)
 
-	/*
-		不将超时设置到conn上，可能情况:
-		header 写入完成，data 超时。导致对端拆包出错。
-	*/
+			// check
+			lastPing := this.lastPingTime.Load().(time.Time)
+			if now.Sub(lastPing) > pingTimeout {
+				this.close(errors.New("smux ping timeout. "))
+				return
+			}
 
-	ret := new(writeResult)
-	if _, ret.err = this.conn.Write(newHeader(cmdPSH, req.sid, uint32(len(req.b)))); ret.err == nil {
-		ret.n, ret.err = this.conn.Write(req.b)
+			timer.Reset(pingInterval)
+		}
 	}
-
-	if ret.err != nil {
-		this.notifyWriteError(ret.err)
-	}
-	retch <- ret
-	return retch
 }
 
 // 仅返回写入的数据长度
 func (this *Session) writeData(sid uint16, b []byte, deadline <-chan time.Time) (n int, err error) {
-	req := &writeRequest{sid: sid, b: b, doing: 0}
+	req := &writeRequest{
+		sid: sid, d: b,
+		hdr:   newHeader(cmdPSH, sid, uint32(len(b))),
+		doing: 0,
+		done:  make(chan *writeResult, 1),
+	}
 
 	select {
 	case <-this.chClose:
-		return 0, ErrClosedPipe
-	case <-this.chSocketWriteError:
-		return 0, this.socketWriteError.Load().(error)
+		return 0, this.closeReason.Load().(error)
+	case this.chWrite <- req:
 	case <-deadline:
 		if atomic.CompareAndSwapInt32(&req.doing, 0, 1) {
 			return 0, ErrTimeout
 		} else {
 			return len(b), ErrTimeout
 		}
-	case ret := <-this.doWrite(req):
+	}
+
+	select {
+	case <-this.chClose:
+		return 0, this.closeReason.Load().(error)
+	case <-deadline:
+		if atomic.CompareAndSwapInt32(&req.doing, 0, 1) {
+			return 0, ErrTimeout
+		} else {
+			return len(b), ErrTimeout
+		}
+	case ret := <-req.done:
 		return ret.n, ret.err
 	}
 }
 
 func (this *Session) writeHeader(cmd byte, sid uint16, length uint32) {
-	this.writeLock.Lock()
-	defer this.writeLock.Unlock()
+	req := &writeRequest{
+		sid:   sid,
+		hdr:   newHeader(cmdPSH, sid, length),
+		doing: 0,
+		done:  make(chan *writeResult, 1),
+	}
+
 	select {
 	case <-this.chClose:
-		return
-	case <-this.chSocketWriteError:
-		return
-	default:
-		_, err := this.conn.Write(newHeader(cmd, sid, length))
-		if err != nil {
-			this.notifyWriteError(err)
-		}
+	case this.chWrite <- req:
 	}
 }
 

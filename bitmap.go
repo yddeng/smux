@@ -6,8 +6,6 @@ import (
 	"sync"
 )
 
-var ErrIDBitmapMax = errors.New("id bitmap max")
-
 type idBitmap struct {
 	bits   []byte
 	next   uint16
@@ -24,7 +22,7 @@ func (this *idBitmap) Get() (uint16, error) {
 	this.lock.Lock()
 	defer this.lock.Unlock()
 	if this.length == 65536 {
-		return 0, ErrIDBitmapMax
+		return 0, errors.New("id use up. ")
 	}
 
 	for {
