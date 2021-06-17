@@ -14,13 +14,6 @@ var (
 	ErrBrokenPipe = errors.New("write on closed stream. ")
 )
 
-func notifyEvent(ch chan struct{}) {
-	select {
-	case ch <- struct{}{}:
-	default:
-	}
-}
-
 // 判断对端是否是多路复用
 func IsSmux(conn net.Conn, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
@@ -47,17 +40,13 @@ func IsSmux(conn net.Conn, timeout time.Duration) bool {
 		}
 	}
 
-	if hdr.Cmd() != cmdVRM || hdr.StreamID() != v11 || hdr.Length() != v22 {
+	if hdr.Cmd() != cmdVRM || hdr.Uint16() != v11 || hdr.Uint32() != v22 {
 		return false
 	}
 	return true
 }
 
-func SmuxSession(conn net.Conn) *Session {
-	return newSession(conn)
-}
-
-func Listen(address string, callback func(session *Session)) error {
+func Listen(address string, callback func(session *MuxSession)) error {
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return err
@@ -74,14 +63,14 @@ func Listen(address string, callback func(session *Session)) error {
 			}
 		}
 
-		callback(SmuxSession(conn))
+		callback(NewMuxSession(conn))
 	}
 }
 
-func Dial(address string) (*Session, error) {
+func Dial(address string) (*MuxSession, error) {
 	conn, err := net.Dial("tcp", address)
 	if err != nil {
 		return nil, err
 	}
-	return SmuxSession(conn), nil
+	return NewMuxSession(conn), nil
 }

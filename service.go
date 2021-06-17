@@ -22,7 +22,7 @@ func (e Event) Writable() bool {
 }
 
 type AIOService struct {
-	session *Session
+	mux *MuxSession
 
 	fd2Callback map[uint16]func(event Event)
 	fdLock      sync.RWMutex
@@ -48,7 +48,7 @@ func (this *AIOService) appendEvent(fd uint16, event Event) {
 }
 
 func (this *AIOService) trigger(fd uint16) {
-	stream := this.session.GetStream(fd)
+	stream := this.mux.GetMuxConn(fd)
 	if stream != nil {
 		var event Event
 		if _, ok := stream.Readable(); ok {
@@ -89,10 +89,10 @@ func (this *AIOService) Unwatch(fd uint16) {
 func (this *AIOService) Close() {
 	this.dieOnce.Do(func() {
 		close(this.die)
-		this.session.aioServiceLocker.Lock()
-		this.session.aioService = nil
-		this.session.aioServiceLocker.Unlock()
-		this.session = nil
+		this.mux.aioServiceLocker.Lock()
+		this.mux.aioService = nil
+		this.mux.aioServiceLocker.Unlock()
+		this.mux = nil
 	})
 }
 
@@ -105,17 +105,17 @@ func (this *AIOService) isClosed() bool {
 	}
 }
 
-func OpenAIOService(session *Session, worker int) *AIOService {
-	session.aioServiceLocker.Lock()
-	defer session.aioServiceLocker.Unlock()
+func OpenAIOService(mux *MuxSession, worker int) *AIOService {
+	mux.aioServiceLocker.Lock()
+	defer mux.aioServiceLocker.Unlock()
 
 	s := &AIOService{
-		session:     session,
+		mux:         mux,
 		fd2Callback: map[uint16]func(event Event){},
 		fdLock:      sync.RWMutex{},
 		taskQueue:   make(chan *task, 1024),
 	}
-	session.aioService = s
+	mux.aioService = s
 
 	if worker <= 0 {
 		worker = 1
@@ -142,7 +142,7 @@ func OpenAIOService(session *Session, worker int) *AIOService {
 	return s
 }
 
-func (this *Session) preparseCmd(fd uint16, cmd byte) {
+func (this *MuxSession) preparseCmd(fd uint16, cmd byte) {
 	this.aioServiceLocker.Lock()
 	defer this.aioServiceLocker.Unlock()
 	if this.aioService == nil || this.aioService.isClosed() {

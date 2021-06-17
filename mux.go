@@ -9,15 +9,15 @@ import (
 	"time"
 )
 
-type Session struct {
+type MuxSession struct {
 	conn    net.Conn
 	idAlloc *idBitmap
 
-	streams    map[uint16]*Stream
-	waitFin    map[uint16]struct{}
-	streamLock sync.Mutex
+	connections map[uint16]*MuxConn
+	connWaitFin map[uint16]struct{}
+	connLock    sync.Mutex
 
-	chAccepts chan *Stream
+	chAccepts chan *MuxConn
 
 	chClose     chan struct{}
 	closeOnce   sync.Once
@@ -31,60 +31,60 @@ type Session struct {
 	aioServiceLocker sync.Mutex
 }
 
-func newSession(conn net.Conn) *Session {
-	sess := &Session{
-		conn:       conn,
-		idAlloc:    NewIDBitmap(),
-		streams:    map[uint16]*Stream{},
-		waitFin:    map[uint16]struct{}{},
-		streamLock: sync.Mutex{},
-		chAccepts:  make(chan *Stream, 1024),
-		chClose:    make(chan struct{}),
-		closeOnce:  sync.Once{},
-		chWrite:    make(chan *writeRequest),
+func NewMuxSession(conn net.Conn) *MuxSession {
+	mux := &MuxSession{
+		conn:        conn,
+		idAlloc:     NewIDBitmap(),
+		connections: map[uint16]*MuxConn{},
+		connWaitFin: map[uint16]struct{}{},
+		connLock:    sync.Mutex{},
+		chAccepts:   make(chan *MuxConn, 1024),
+		chClose:     make(chan struct{}),
+		closeOnce:   sync.Once{},
+		chWrite:     make(chan *writeRequest),
 	}
-	sess.lastPingTime.Store(time.Now())
+	mux.lastPingTime.Store(time.Now())
 
-	go sess.readLoop()
-	go sess.writeLoop()
-	go sess.ping()
-	return sess
+	go mux.readLoop()
+	go mux.writeLoop()
+	go mux.ping()
+	return mux
 }
 
-func (this *Session) Accept() (*Stream, error) {
+func (this *MuxSession) Accept() (*MuxConn, error) {
 	select {
-	case stream := <-this.chAccepts:
-		return stream, nil
+	case conn := <-this.chAccepts:
+		return conn, nil
 	case <-this.chClose:
 		return nil, this.closeReason.Load().(error)
 	}
 }
 
-func (this *Session) Open() (*Stream, error) {
+func (this *MuxSession) Open() (*MuxConn, error) {
 	select {
 	case <-this.chClose:
 		return nil, this.closeReason.Load().(error)
 	default:
 	}
 
-	this.streamLock.Lock()
-	defer this.streamLock.Unlock()
+	this.connLock.Lock()
+	defer this.connLock.Unlock()
 
-	sid, err := this.idAlloc.Get()
+	cid, err := this.idAlloc.Get()
 	if err != nil {
 		return nil, err
 	}
 
-	s := newStream(sid, this)
-	this.streams[sid] = s
+	c := newMuxConn(cid, this)
+	this.connections[cid] = c
 
-	this.writeHeader(cmdSYN, sid, 0)
+	this.writeHeader(cmdSYN, cid, 0)
 
-	return s, nil
+	return c, nil
 }
 
 // IsClosed does a safe check to see if we have shutdown
-func (this *Session) IsClosed() bool {
+func (this *MuxSession) IsClosed() bool {
 	select {
 	case <-this.chClose:
 		return true
@@ -93,53 +93,53 @@ func (this *Session) IsClosed() bool {
 	}
 }
 
-func (this *Session) NumStream() int {
+func (this *MuxSession) NumMuxConn() int {
 	select {
 	case <-this.chClose:
 		return 0
 	default:
-		this.streamLock.Lock()
-		defer this.streamLock.Unlock()
-		return len(this.streams)
+		this.connLock.Lock()
+		defer this.connLock.Unlock()
+		return len(this.connections)
 	}
 }
 
-func (this *Session) GetStream(streamID uint16) *Stream {
+func (this *MuxSession) GetMuxConn(connID uint16) *MuxConn {
 	select {
 	case <-this.chClose:
 		return nil
 	default:
-		this.streamLock.Lock()
-		defer this.streamLock.Unlock()
-		return this.streams[streamID]
+		this.connLock.Lock()
+		defer this.connLock.Unlock()
+		return this.connections[connID]
 	}
 }
 
-func (this *Session) Addr() net.Addr {
+func (this *MuxSession) Addr() net.Addr {
 	return this.conn.LocalAddr()
 }
 
-func (this *Session) Close() {
+func (this *MuxSession) Close() {
 	this.close(errors.New("closed smux. "))
 }
 
-func (this *Session) close(err error) {
+func (this *MuxSession) close(err error) {
 	this.closeOnce.Do(func() {
 		this.closeReason.Store(err)
 		close(this.chClose)
 		this.conn.Close()
 
-		this.streamLock.Lock()
-		for sid := range this.streams {
-			this.streams[sid].fin()
-			this.preparseCmd(sid, cmdFIN)
+		this.connLock.Lock()
+		for cid := range this.connections {
+			this.connections[cid].fin()
+			this.preparseCmd(cid, cmdFIN)
 		}
-		this.streams = map[uint16]*Stream{}
-		this.streamLock.Unlock()
+		this.connections = map[uint16]*MuxConn{}
+		this.connLock.Unlock()
 	})
 }
 
-func (this *Session) readLoop() {
+func (this *MuxSession) readLoop() {
 	var (
 		hdr    header
 		buffer = make([]byte, frameSize)
@@ -148,62 +148,62 @@ func (this *Session) readLoop() {
 		// read header first
 		if _, err := io.ReadFull(this.conn, hdr[:]); err == nil {
 			cmd := hdr.Cmd()
-			sid := hdr.StreamID()
-			length := hdr.Length()
+			cid := hdr.Uint16()
+			length := hdr.Uint32()
 			switch cmd {
 			case cmdSYN:
-				this.streamLock.Lock()
-				if _, ok := this.streams[sid]; !ok {
-					this.idAlloc.Set(sid)
-					stream := newStream(sid, this)
-					this.streams[sid] = stream
+				this.connLock.Lock()
+				if _, ok := this.connections[cid]; !ok {
+					this.idAlloc.Set(cid)
+					conn := newMuxConn(cid, this)
+					this.connections[cid] = conn
 					select {
-					case this.chAccepts <- stream:
+					case this.chAccepts <- conn:
 					case <-this.chClose:
 					}
 				}
-				this.streamLock.Unlock()
+				this.connLock.Unlock()
 			case cmdFIN:
-				this.streamLock.Lock()
-				if _, ok := this.waitFin[sid]; ok {
+				this.connLock.Lock()
+				if _, ok := this.connWaitFin[cid]; ok {
 					/*
-					 1. A端关闭，B端执行stream.fin()后返回fin。
+					 1. A端关闭，B端执行conn.fin()后返回fin。
 					 2. 两端同时关闭，本端fin还未到达对端，就收到对端的fin。
 					*/
-					this.idAlloc.Put(sid)
-					delete(this.streams, sid)
-					delete(this.waitFin, sid)
-				} else if stream, ok := this.streams[sid]; ok {
+					this.idAlloc.Put(cid)
+					delete(this.connections, cid)
+					delete(this.connWaitFin, cid)
+				} else if conn, ok := this.connections[cid]; ok {
 					// 对端关闭
-					stream.fin()
-					delete(this.streams, sid)
-					this.writeHeader(cmdFIN, sid, 0)
-					this.preparseCmd(sid, cmdFIN)
+					conn.fin()
+					delete(this.connections, cid)
+					this.writeHeader(cmdFIN, cid, 0)
+					this.preparseCmd(cid, cmdFIN)
 				}
-				this.streamLock.Unlock()
+				this.connLock.Unlock()
 			case cmdPSH:
 				if length > 0 {
 					if _, err := io.ReadFull(this.conn, buffer[:length]); err == nil {
-						this.streamLock.Lock()
-						if stream, ok := this.streams[sid]; ok {
-							stream.pushBytes(buffer[:length])
-							this.preparseCmd(stream.streamID, cmdPSH) // epoll
+						this.connLock.Lock()
+						if conn, ok := this.connections[cid]; ok {
+							conn.pushBytes(buffer[:length])
+							this.preparseCmd(conn.connID, cmdPSH) // epoll
 						}
-						this.streamLock.Unlock()
+						this.connLock.Unlock()
 					} else {
 						this.close(err)
 						return
 					}
 				}
 			case cmdCFM:
-				this.streamLock.Lock()
-				if stream, ok := this.streams[sid]; ok {
-					stream.bytesConfirm(length)
-					this.preparseCmd(stream.streamID, cmdCFM) // epoll
+				this.connLock.Lock()
+				if conn, ok := this.connections[cid]; ok {
+					conn.bytesConfirm(length)
+					this.preparseCmd(conn.connID, cmdCFM) // epoll
 				}
-				this.streamLock.Unlock()
+				this.connLock.Unlock()
 			case cmdVRM:
-				v11, v22 := verifyCode(sid, length)
+				v11, v22 := verifyCode(cid, length)
 				this.writeHeader(cmdVRM, v11, v22)
 			case cmdPIN:
 				this.lastPingTime.Store(time.Now())
@@ -224,14 +224,14 @@ type writeResult struct {
 }
 
 type writeRequest struct {
-	sid   uint16
+	cid   uint16
 	hdr   []byte
 	d     []byte
 	doing int32
 	done  chan *writeResult
 }
 
-func (this *Session) writeLoop() {
+func (this *MuxSession) writeLoop() {
 	for {
 		select {
 		case <-this.chClose:
@@ -265,7 +265,7 @@ func (this *Session) writeLoop() {
 	}
 }
 
-func (this *Session) ping() {
+func (this *MuxSession) ping() {
 	timer := time.NewTimer(pingInterval)
 	defer timer.Stop()
 	for {
@@ -288,10 +288,10 @@ func (this *Session) ping() {
 }
 
 // 仅返回写入的数据长度
-func (this *Session) writeData(sid uint16, b []byte, deadline <-chan time.Time) (n int, err error) {
+func (this *MuxSession) writeData(cid uint16, b []byte, deadline <-chan time.Time) (n int, err error) {
 	req := &writeRequest{
-		sid: sid, d: b,
-		hdr:   newHeader(cmdPSH, sid, uint32(len(b))),
+		cid: cid, d: b,
+		hdr:   newHeader(cmdPSH, cid, uint32(len(b))),
 		doing: 0,
 		done:  make(chan *writeResult, 1),
 	}
@@ -322,10 +322,10 @@ func (this *Session) writeData(sid uint16, b []byte, deadline <-chan time.Time) 
 	}
 }
 
-func (this *Session) writeHeader(cmd byte, sid uint16, length uint32) {
+func (this *MuxSession) writeHeader(cmd byte, cid uint16, length uint32) {
 	req := &writeRequest{
-		sid:   sid,
-		hdr:   newHeader(cmdPSH, sid, length),
+		cid:   cid,
+		hdr:   newHeader(cmdPSH, cid, length),
 		doing: 0,
 		done:  make(chan *writeResult, 1),
 	}
@@ -336,12 +336,12 @@ func (this *Session) writeHeader(cmd byte, sid uint16, length uint32) {
 	}
 }
 
-func (this *Session) closedStream(sid uint16) {
-	this.streamLock.Lock()
-	defer this.streamLock.Unlock()
-	if _, ok := this.streams[sid]; ok {
-		this.waitFin[sid] = struct{}{}
-		this.writeHeader(cmdFIN, sid, 0)
-		this.preparseCmd(sid, cmdFIN)
+func (this *MuxSession) closedMuxConn(cid uint16) {
+	this.connLock.Lock()
+	defer this.connLock.Unlock()
+	if _, ok := this.connections[cid]; ok {
+		this.connWaitFin[cid] = struct{}{}
+		this.writeHeader(cmdFIN, cid, 0)
+		this.preparseCmd(cid, cmdFIN)
 	}
 }

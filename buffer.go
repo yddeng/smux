@@ -7,7 +7,7 @@ type Buffer struct {
 	empty bool
 }
 
-func New(size int) *Buffer {
+func NewBuffer(size int) *Buffer {
 	return &Buffer{
 		buf:   make([]byte, size),
 		cap:   size,

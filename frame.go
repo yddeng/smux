@@ -7,8 +7,8 @@ import (
 )
 
 const (
-	cmdSYN byte = iota // stream open
-	cmdFIN             // stream close, a.k.a EOF mark
+	cmdSYN byte = iota // connection open
+	cmdFIN             // connection close, a.k.a EOF mark
 	cmdPSH             // data push
 	cmdCFM             // number bytes of confirm
 	cmdVRM             // verify remote is multiplexed
@@ -16,10 +16,10 @@ const (
 )
 
 /*
-	cmdSYN : streamID
-	cmdFIN : streamID
-	cmdPSH : streamID + 推送的数据长度 + data
-	cmdCFM : streamID + 确认的数据长度
+	cmdSYN : connID
+	cmdFIN : connID
+	cmdPSH : connID + 推送的数据长度 + data
+	cmdCFM : connID + 确认的数据长度
 	cmdVRM : 随机值 + 随机值
 	cmdPIN : 0 + 0
 */
@@ -33,7 +33,7 @@ const (
 
 const frameSize = 64 * 1024
 
-const streamWindowSize = 512 * 1024
+const muxConnWindowSize = 512 * 1024
 
 const (
 	pingInterval = time.Second * 10
@@ -46,11 +46,11 @@ func (h header) Cmd() byte {
 	return h[0]
 }
 
-func (h header) StreamID() uint16 {
+func (h header) Uint16() uint16 {
 	return binary.LittleEndian.Uint16(h[1:])
 }
 
-func (h header) Length() uint32 {
+func (h header) Uint32() uint32 {
 	return binary.LittleEndian.Uint32(h[3:])
 }
 
@@ -60,17 +60,24 @@ var headerGroup = sync.Pool{
 	},
 }
 
-func newHeader(cmd byte, sid uint16, len uint32) []byte {
+func newHeader(cmd byte, id uint16, len uint32) []byte {
 	hdr := headerGroup.Get().([]byte)
 	//hdr := make([]byte, headerSize)
 	hdr[0] = cmd
-	binary.LittleEndian.PutUint16(hdr[1:], sid)
+	binary.LittleEndian.PutUint16(hdr[1:], id)
 	binary.LittleEndian.PutUint32(hdr[3:], len)
 	return hdr
 }
 
 func putHeader(h []byte) {
 	headerGroup.Put(h)
+}
+
+func notifyEvent(ch chan struct{}) {
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
 }
 
 /*

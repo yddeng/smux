@@ -13,11 +13,11 @@ import (
  只有在非堵塞模式下才有的返回错误
  读情况下，没有数据可读；写情况下，不能写且已发送为0
 */
-var N_DISABLE = errors.New("nonblock read/write disable. ")
+var ErrNonblock = errors.New("nonblock. ")
 
-type Stream struct {
-	sess     *Session
-	streamID uint16
+type MuxConn struct {
+	mux    *MuxSession
+	connID uint16
 
 	bufferRead uint32
 	buffer     *Buffer
@@ -48,11 +48,11 @@ type Stream struct {
 	chNonblockEvent chan struct{}
 }
 
-func newStream(sid uint16, sess *Session) *Stream {
-	return &Stream{
-		sess:            sess,
-		streamID:        sid,
-		buffer:          New(streamWindowSize),
+func newMuxConn(cid uint16, mux *Mux) *MuxConn {
+	return &MuxConn{
+		mux:             mux,
+		connID:          cid,
+		buffer:          NewBuffer(muxConnWindowSize),
 		bufferLock:      sync.Mutex{},
 		chReadEvent:     make(chan struct{}, 1),
 		chWriteEvent:    make(chan struct{}, 1),
@@ -66,11 +66,11 @@ func newStream(sid uint16, sess *Session) *Stream {
 	}
 }
 
-func (this *Stream) StreamID() uint16 {
-	return this.streamID
+func (this *MuxConn) ID() uint16 {
+	return this.connID
 }
 
-func (this *Stream) SetNonblock(nonblocking bool) {
+func (this *MuxConn) SetNonblock(nonblocking bool) {
 	if nonblocking {
 		if atomic.CompareAndSwapUint32(&this.nonblock, 0, 1) {
 			notifyEvent(this.chNonblockEvent)
@@ -81,13 +81,13 @@ func (this *Stream) SetNonblock(nonblocking bool) {
 }
 
 // Readable returns length of read buffer
-func (this *Stream) Readable() (int, bool) {
+func (this *MuxConn) Readable() (int, bool) {
 	this.bufferLock.Lock()
 	defer this.bufferLock.Unlock()
 	return this.buffer.Len(), !this.buffer.Empty()
 }
 
-func (this *Stream) Read(b []byte) (n int, err error) {
+func (this *MuxConn) Read(b []byte) (n int, err error) {
 	select {
 	case <-this.chClose:
 		return 0, ErrClosedPipe
@@ -110,7 +110,7 @@ func (this *Stream) Read(b []byte) (n int, err error) {
 	}
 }
 
-func (this *Stream) tryRead(b []byte) (n int, err error) {
+func (this *MuxConn) tryRead(b []byte) (n int, err error) {
 	if len(b) == 0 {
 		return
 	}
@@ -123,15 +123,15 @@ func (this *Stream) tryRead(b []byte) (n int, err error) {
 	} else {
 		n, err = this.buffer.Read(b)
 		this.bufferRead += uint32(n)
-		if this.bufferRead >= streamWindowSize/2 {
-			this.sess.writeHeader(cmdCFM, this.streamID, this.bufferRead)
+		if this.bufferRead >= muxConnWindowSize/2 {
+			this.mux.writeHeader(cmdCFM, this.connID, this.bufferRead)
 			this.bufferRead = 0
 		}
 		return
 	}
 }
 
-func (this *Stream) waitRead() error {
+func (this *MuxConn) waitRead() error {
 	var timer *time.Timer
 	var deadline <-chan time.Time
 	if d, ok := this.readDeadline.Load().(time.Time); ok && !d.IsZero() {
@@ -159,16 +159,16 @@ func (this *Stream) waitRead() error {
 	case <-deadline:
 		return ErrTimeout
 	case <-this.chClose:
-		return this.sess.closeReason.Load().(error)
+		return this.mux.closeReason.Load().(error)
 	case <-this.chNonblockEvent:
 		return nil
 	case <-nonblockC:
 		// 怎样降低优先级
-		return N_DISABLE
+		return ErrNonblock
 	}
 }
 
-func (this *Stream) pushBytes(b []byte) {
+func (this *MuxConn) pushBytes(b []byte) {
 	select {
 	case <-this.chClose:
 		return
@@ -185,12 +185,12 @@ func (this *Stream) pushBytes(b []byte) {
 }
 
 // Writable returns write windows
-func (this *Stream) Writable() (int, bool) {
-	writeWindows := streamWindowSize - atomic.LoadUint32(&this.waitConfirm)
+func (this *MuxConn) Writable() (int, bool) {
+	writeWindows := muxConnWindowSize - atomic.LoadUint32(&this.waitConfirm)
 	return int(writeWindows), writeWindows > 0
 }
 
-func (this *Stream) Write(b []byte) (n int, err error) {
+func (this *MuxConn) Write(b []byte) (n int, err error) {
 	select {
 	case <-this.chClose:
 		return 0, ErrClosedPipe
@@ -213,7 +213,7 @@ func (this *Stream) Write(b []byte) (n int, err error) {
 	sentb := b
 	blen := len(sentb)
 	for n < blen {
-		wSize := streamWindowSize - atomic.LoadUint32(&this.waitConfirm)
+		wSize := muxConnWindowSize - atomic.LoadUint32(&this.waitConfirm)
 		if wSize <= 0 {
 			var nonblockC chan struct{}
 			if atomic.LoadUint32(&this.nonblock) == 1 {
@@ -232,7 +232,7 @@ func (this *Stream) Write(b []byte) (n int, err error) {
 			case <-this.chNonblockEvent:
 			case <-nonblockC:
 				if n == 0 {
-					err = N_DISABLE
+					err = ErrNonblock
 				}
 				return
 			}
@@ -245,7 +245,7 @@ func (this *Stream) Write(b []byte) (n int, err error) {
 				sz = frameSize
 			}
 
-			sendn, err := this.sess.writeData(this.streamID, sentb[n:n+sz], deadline)
+			sendn, err := this.mux.writeData(this.connID, sentb[n:n+sz], deadline)
 			if sendn > 0 {
 				atomic.AddUint32(&this.waitConfirm, uint32(sendn))
 				n += sendn
@@ -259,13 +259,13 @@ func (this *Stream) Write(b []byte) (n int, err error) {
 	return
 }
 
-func (this *Stream) bytesConfirm(count uint32) uint32 {
-	windows := streamWindowSize - atomic.AddUint32(&this.waitConfirm, -count)
+func (this *MuxConn) bytesConfirm(count uint32) uint32 {
+	windows := muxConnWindowSize - atomic.AddUint32(&this.waitConfirm, -count)
 	notifyEvent(this.chWriteEvent)
 	return windows
 }
 
-func (this *Stream) Close() error {
+func (this *MuxConn) Close() error {
 	var once bool
 	this.closeOnce.Do(func() {
 		close(this.chClose)
@@ -273,14 +273,14 @@ func (this *Stream) Close() error {
 	})
 
 	if once {
-		this.sess.closedStream(this.streamID)
+		this.mux.closedMuxConn(this.connID)
 		return nil
 	} else {
 		return ErrClosedPipe
 	}
 }
 
-func (this *Stream) fin() {
+func (this *MuxConn) fin() {
 	this.finOnce.Do(func() {
 		close(this.chFin)
 	})
@@ -289,7 +289,7 @@ func (this *Stream) fin() {
 // SetReadDeadline sets the read deadline as defined by
 // net.Conn.SetReadDeadline.
 // A zero time value disables the deadline.
-func (this *Stream) SetReadDeadline(t time.Time) error {
+func (this *MuxConn) SetReadDeadline(t time.Time) error {
 	this.readDeadline.Store(t)
 	return nil
 }
@@ -297,7 +297,7 @@ func (this *Stream) SetReadDeadline(t time.Time) error {
 // SetWriteDeadline sets the write deadline as defined by
 // net.Conn.SetWriteDeadline.
 // A zero time value disables the deadline.
-func (this *Stream) SetWriteDeadline(t time.Time) error {
+func (this *MuxConn) SetWriteDeadline(t time.Time) error {
 	this.writeDeadline.Store(t)
 	return nil
 }
@@ -305,7 +305,7 @@ func (this *Stream) SetWriteDeadline(t time.Time) error {
 // SetDeadline sets both read and write deadlines as defined by
 // net.Conn.SetDeadline.
 // A zero time value disables the deadlines.
-func (this *Stream) SetDeadline(t time.Time) error {
+func (this *MuxConn) SetDeadline(t time.Time) error {
 	if err := this.SetReadDeadline(t); err != nil {
 		return err
 	}
@@ -316,11 +316,11 @@ func (this *Stream) SetDeadline(t time.Time) error {
 }
 
 // LocalAddr satisfies net.Conn interface
-func (this *Stream) LocalAddr() net.Addr {
-	return this.sess.conn.LocalAddr()
+func (this *MuxConn) LocalAddr() net.Addr {
+	return this.mux.conn.LocalAddr()
 }
 
 // RemoteAddr satisfies net.Conn interface
-func (this *Stream) RemoteAddr() net.Addr {
-	return this.sess.conn.RemoteAddr()
+func (this *MuxConn) RemoteAddr() net.Addr {
+	return this.mux.conn.RemoteAddr()
 }
