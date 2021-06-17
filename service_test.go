@@ -29,7 +29,7 @@ func init() {
 }
 
 type AIOConn struct {
-	stream  *Stream
+	conn    *MuxConn
 	service *AIOService
 }
 
@@ -40,22 +40,22 @@ func (this *AIOConn) doRead() {
 	taskQueue <- func() {
 		buf := make([]byte, 128)
 
-		n, err := this.stream.Read(buf)
+		n, err := this.conn.Read(buf)
 		if err == nil {
-			n, err = this.stream.Write(buf[:n])
+			n, err = this.conn.Write(buf[:n])
 		}
 
 		if err != nil {
-			fmt.Println("error", this.stream.StreamID(), err)
-			if err != N_DISABLE {
-				this.service.Unwatch(this.stream.StreamID())
+			fmt.Println("error", this.conn.ID(), err)
+			if err != ErrNonblock {
+				this.service.Unwatch(this.conn.ID())
 			}
 		}
 	}
 }
 
 func (this *AIOConn) onEventCallback(event Event) {
-	//fmt.Println("onEventCallback", this.stream.StreamID(), event)
+	//fmt.Println("onEventCallback", this.conn.ID(), event)
 	if event.Readable() {
 		this.doRead()
 	}
@@ -90,55 +90,55 @@ func TestAIOService(t *testing.T) {
 }
 
 func server(conn net.Conn, t *testing.T) {
-	session := SmuxSession(conn)
+	session := NewMuxSession(conn)
 	aioService = OpenAIOService(session, 1)
 
 	go func() {
 		for {
-			stream, err := session.Accept()
+			conn, err := session.Accept()
 			if err != nil {
 				t.Error(err)
 				return
 			}
-			//t.Log("stream", stream.StreamID())
+			//t.Log("conn", conn.ID())
 
-			aioConn := &AIOConn{stream: stream, service: aioService}
+			aioConn := &AIOConn{conn: conn, service: aioService}
 
 			aioLock.Lock()
-			aioConns[stream.StreamID()] = aioConn
+			aioConns[conn.ID()] = aioConn
 			aioLock.Unlock()
 
-			stream.SetNonblock(true)
-			aioService.Watch(stream.StreamID(), aioConn.onEventCallback)
+			conn.SetNonblock(true)
+			aioService.Watch(conn.ID(), aioConn.onEventCallback)
 		}
 	}()
 
 }
 
 func client(conn net.Conn, t *testing.T) {
-	session := SmuxSession(conn)
+	session := NewMuxSession(conn)
 
 	wg := sync.WaitGroup{}
 
 	var count uint32 = 0
 	for i := 0; i < 2; i++ {
-		stream, _ := session.Open()
+		conn, _ := session.Open()
 		wg.Add(1)
 		data := make([]byte, 4)
 		binary.BigEndian.PutUint32(data, uint32(i))
 
-		//t.Log("open", stream.StreamID())
-		go func(stream *Stream) {
+		//t.Log("open", conn.ID())
+		go func(conn *MuxConn) {
 			defer wg.Done()
-			defer stream.Close()
+			defer conn.Close()
 
-			_, err := stream.Write(data)
+			_, err := conn.Write(data)
 			if err != nil {
 				t.Error(err)
 				return
 			}
 			buf := make([]byte, 12)
-			n, err := stream.Read(buf)
+			n, err := conn.Read(buf)
 			if err != nil {
 				t.Error(err)
 				return
@@ -146,7 +146,7 @@ func client(conn net.Conn, t *testing.T) {
 			k := atomic.AddUint32(&count, 1)
 			t.Log(buf[:n], k)
 
-		}(stream)
+		}(conn)
 	}
 
 	wg.Wait()

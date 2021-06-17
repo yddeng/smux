@@ -4,8 +4,8 @@ import (
 	"testing"
 )
 
-func TestNew(t *testing.T) {
-	b := New(16)
+func TestNewBuffer(t *testing.T) {
+	b := NewBuffer(16)
 	t.Log(b.Empty(), b.Full(), b.Len(), b.Cap())
 
 	d1 := make([]byte, 15)

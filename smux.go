@@ -67,8 +67,9 @@ func Listen(address string, callback func(session *MuxSession)) error {
 	}
 }
 
-func Dial(address string) (*MuxSession, error) {
-	conn, err := net.Dial("tcp", address)
+func Dial(address string, timeout time.Duration) (*MuxSession, error) {
+	dialer := &net.Dialer{Timeout: timeout}
+	conn, err := dialer.Dial("tcp", address)
 	if err != nil {
 		return nil, err
 	}

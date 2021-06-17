@@ -16,7 +16,7 @@ import (
 var ErrNonblock = errors.New("nonblock. ")
 
 type MuxConn struct {
-	mux    *MuxSession
+	ms     *MuxSession
 	connID uint16
 
 	bufferRead uint32
@@ -48,9 +48,9 @@ type MuxConn struct {
 	chNonblockEvent chan struct{}
 }
 
-func newMuxConn(cid uint16, mux *Mux) *MuxConn {
+func newMuxConn(cid uint16, ms *MuxSession) *MuxConn {
 	return &MuxConn{
-		mux:             mux,
+		ms:              ms,
 		connID:          cid,
 		buffer:          NewBuffer(muxConnWindowSize),
 		bufferLock:      sync.Mutex{},
@@ -124,7 +124,7 @@ func (this *MuxConn) tryRead(b []byte) (n int, err error) {
 		n, err = this.buffer.Read(b)
 		this.bufferRead += uint32(n)
 		if this.bufferRead >= muxConnWindowSize/2 {
-			this.mux.writeHeader(cmdCFM, this.connID, this.bufferRead)
+			this.ms.writeHeader(cmdCFM, this.connID, this.bufferRead)
 			this.bufferRead = 0
 		}
 		return
@@ -159,7 +159,7 @@ func (this *MuxConn) waitRead() error {
 	case <-deadline:
 		return ErrTimeout
 	case <-this.chClose:
-		return this.mux.closeReason.Load().(error)
+		return this.ms.closeReason.Load().(error)
 	case <-this.chNonblockEvent:
 		return nil
 	case <-nonblockC:
@@ -245,7 +245,7 @@ func (this *MuxConn) Write(b []byte) (n int, err error) {
 				sz = frameSize
 			}
 
-			sendn, err := this.mux.writeData(this.connID, sentb[n:n+sz], deadline)
+			sendn, err := this.ms.writeData(this.connID, sentb[n:n+sz], deadline)
 			if sendn > 0 {
 				atomic.AddUint32(&this.waitConfirm, uint32(sendn))
 				n += sendn
@@ -273,7 +273,7 @@ func (this *MuxConn) Close() error {
 	})
 
 	if once {
-		this.mux.closedMuxConn(this.connID)
+		this.ms.closedMuxConn(this.connID)
 		return nil
 	} else {
 		return ErrClosedPipe
@@ -317,10 +317,10 @@ func (this *MuxConn) SetDeadline(t time.Time) error {
 
 // LocalAddr satisfies net.Conn interface
 func (this *MuxConn) LocalAddr() net.Addr {
-	return this.mux.conn.LocalAddr()
+	return this.ms.conn.LocalAddr()
 }
 
 // RemoteAddr satisfies net.Conn interface
 func (this *MuxConn) RemoteAddr() net.Addr {
-	return this.mux.conn.RemoteAddr()
+	return this.ms.conn.RemoteAddr()
 }

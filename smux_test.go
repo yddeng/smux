@@ -7,25 +7,41 @@ import (
 	"time"
 )
 
-func listen(addr string, f func(session *Session)) {
-	l, err := net.Listen("tcp", addr)
-	if err != nil {
-		panic(err)
-	}
-
-	for {
-		conn, err := l.Accept()
-		if err != nil {
-			panic(err)
-		}
-
-		f(SmuxSession(conn.(*net.TCPConn)))
-	}
-}
+//func listen(addr string, f func(session *MuxSession)) {
+//	l, err := net.Listen("tcp", addr)
+//	if err != nil {
+//		panic(err)
+//	}
+//
+//	for {
+//		conn, err := l.Accept()
+//		if err != nil {
+//			panic(err)
+//		}
+//
+//		f(NewMuxSession(conn.(*net.TCPConn)))
+//	}
+//}
 
 var ch = make(chan struct{})
 
-func handle(s *Stream, t *testing.T) {
+func startListen(addr string, t *testing.T) {
+	go Listen(addr, func(session *MuxSession) {
+		t.Log("new session")
+		go func() {
+			for {
+				s, err := session.Accept()
+				if err != nil {
+					panic(err)
+				}
+				t.Log("new MuxConn", s.ID())
+				handle(s, t)
+			}
+		}()
+	})
+}
+
+func handle(s *MuxConn, t *testing.T) {
 	go func() {
 		<-ch
 		b := make([]byte, 64*1024)
@@ -37,49 +53,39 @@ func handle(s *Stream, t *testing.T) {
 				break
 			}
 			sum += n
-			//t.Log("s2 read", s.StreamID(), n)
+			//t.Log("s2 read", s.ID(), n)
 		}
 
 		t.Log("s2 read all length", sum)
 	}()
 }
 
+func listenAndDial(addr string, t *testing.T) *MuxSession {
+	startListen(addr, t)
+	time.Sleep(time.Millisecond * 100)
+	sess, err := Dial(addr, time.Second)
+	if err != nil {
+		panic(err)
+	}
+	return sess
+}
+
 func TestFullSend(t *testing.T) {
 	addr := "127.0.0.1:4562"
-	go listen(addr, func(session *Session) {
-		t.Log("new session")
-		go func() {
-			for {
-				s, err := session.Accept()
-				if err != nil {
-					panic(err)
-				}
-				t.Log("new stream", s.StreamID())
-				handle(s, t)
-			}
-		}()
-	})
+	sess := listenAndDial(addr, t)
 
-	time.Sleep(time.Second)
-
-	conn, err := net.Dial("tcp", addr)
+	conn, err := sess.Open()
 	if err != nil {
 		panic(err)
 	}
 
-	s := SmuxSession(conn.(*net.TCPConn))
-	stream, err := s.Open()
-	if err != nil {
-		panic(err)
-	}
-
-	t.Log("s1", stream.StreamID())
+	t.Log("s1", conn.ID())
 
 	data := make([]byte, 64*1024)
 	sum := 0
 	for {
-		stream.SetWriteDeadline(time.Now().Add(time.Second))
-		n, err := stream.Write(data)
+		conn.SetWriteDeadline(time.Now().Add(time.Second))
+		n, err := conn.Write(data)
 		t.Log("s1 write", n, err)
 		sum += n
 		if err != nil {
@@ -89,49 +95,29 @@ func TestFullSend(t *testing.T) {
 
 	t.Log("fullWrite", sum)
 	close(ch)
-	stream.SetWriteDeadline(time.Time{})
-	stream.Close()
+	conn.SetWriteDeadline(time.Time{})
+	conn.Close()
 
-	time.Sleep(time.Second * 5)
-
+	time.Sleep(time.Second)
 }
 
 func TestStream_SetNonblock(t *testing.T) {
 	addr := "127.0.0.1:4562"
-	go listen(addr, func(session *Session) {
-		t.Log("new session")
-		go func() {
-			for {
-				s, err := session.Accept()
-				if err != nil {
-					panic(err)
-				}
-				t.Log("new stream", s.StreamID())
-			}
-		}()
-	})
+	sess := listenAndDial(addr, t)
 
-	time.Sleep(time.Second)
-
-	conn, err := net.Dial("tcp", addr)
+	conn, err := sess.Open()
 	if err != nil {
 		panic(err)
 	}
 
-	s := SmuxSession(conn.(*net.TCPConn))
-	stream, err := s.Open()
-	if err != nil {
-		panic(err)
-	}
+	conn.SetNonblock(true)
 
-	stream.SetNonblock(true)
-
-	t.Log("s1", stream.StreamID())
+	t.Log("s1", conn.ID())
 
 	data := make([]byte, 64*1024)
 	sum := 0
 	for {
-		n, err := stream.Write(data)
+		n, err := conn.Write(data)
 		t.Log("s1 write", n, err)
 		sum += n
 		if err != nil {
@@ -140,34 +126,34 @@ func TestStream_SetNonblock(t *testing.T) {
 	}
 
 	t.Log("fullWrite", sum)
-	stream.Close()
+	conn.Close()
 }
 
 func TestStream_Open(t *testing.T) {
 	addr := "127.0.0.1:4562"
 
-	go listen(addr, func(s *Session) {
+	go Listen(addr, func(s *MuxSession) {
 		t.Log("new session")
 		go func() {
 			for {
-				stream, err := s.Accept()
+				conn, err := s.Accept()
 				if err != nil {
 					panic(err)
 				}
-				t.Log("new stream", stream.StreamID())
-				handle(stream, t)
+				t.Log("new MuxConn", conn.ID())
+				handle(conn, t)
 			}
 		}()
 
 		go func() {
 			for {
-				stream, err := s.Open()
+				MuxConn, err := s.Open()
 				if err != nil {
 					t.Log(err)
 					break
 				}
-				t.Log("open ", stream.StreamID())
-				stream.Write([]byte{1, 2, 3, 4})
+				t.Log("open ", MuxConn.ID())
+				MuxConn.Write([]byte{1, 2, 3, 4})
 				time.Sleep(time.Millisecond)
 			}
 		}()
@@ -180,25 +166,25 @@ func TestStream_Open(t *testing.T) {
 		panic(err)
 	}
 
-	s := SmuxSession(conn)
+	s := NewMuxSession(conn)
 	go func() {
 		for {
-			stream, err := s.Accept()
+			conn, err := s.Accept()
 			if err != nil {
 				panic(err)
 			}
-			t.Log("new stream", stream.StreamID())
-			handle(stream, t)
+			t.Log("new MuxConn", conn.ID())
+			handle(conn, t)
 		}
 	}()
 
 	for {
-		stream, err := s.Open()
+		conn, err := s.Open()
 		if err != nil {
 			t.Log(err)
 			break
 		}
-		stream.Write([]byte{1, 2, 3, 4})
+		conn.Write([]byte{1, 2, 3, 4})
 	}
 
 	time.Sleep(time.Second)
@@ -207,7 +193,7 @@ func TestStream_Open(t *testing.T) {
 func TestIsSmux(t *testing.T) {
 
 	addr := "127.0.0.1:4562"
-	go listen(addr, func(session *Session) {
+	go Listen(addr, func(session *MuxSession) {
 		t.Log("new session")
 		go func() {
 			for {
@@ -215,7 +201,7 @@ func TestIsSmux(t *testing.T) {
 				if err != nil {
 					panic(err)
 				}
-				t.Log("new stream", s.StreamID())
+				t.Log("new MuxConn", s.ID())
 				handle(s, t)
 			}
 		}()
@@ -232,7 +218,7 @@ func TestIsSmux(t *testing.T) {
 	t.Log("remote connection is smux", b)
 }
 
-func setupServer(tb testing.TB) (addr string, stopfunc func(), client net.Conn, err error) {
+func setupServer(t *testing.T) (addr string, stopfunc func(), client net.Conn, err error) {
 	ln, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
 		return "", nil, nil, err
@@ -254,10 +240,10 @@ func setupServer(tb testing.TB) (addr string, stopfunc func(), client net.Conn, 
 }
 
 func handleConnection(conn net.Conn) {
-	session := SmuxSession(conn.(*net.TCPConn))
+	session := NewMuxSession(conn.(*net.TCPConn))
 	for {
-		if stream, err := session.Accept(); err == nil {
-			go func(s *Stream) {
+		if conn, err := session.Accept(); err == nil {
+			go func(s *MuxConn) {
 				buf := make([]byte, 65536)
 				i := 0
 				send := 0
@@ -270,7 +256,7 @@ func handleConnection(conn net.Conn) {
 					sendn, _ := s.Write(buf[:n])
 					send += sendn
 				}
-			}(stream)
+			}(conn)
 		} else {
 			return
 		}
@@ -283,9 +269,9 @@ func TestSpeed(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer stop()
-	session := SmuxSession(cli.(*net.TCPConn))
-	stream, _ := session.Open()
-	t.Log(stream.LocalAddr(), stream.RemoteAddr())
+	session := NewMuxSession(cli.(*net.TCPConn))
+	MuxConn, _ := session.Open()
+	t.Log(MuxConn.LocalAddr(), MuxConn.RemoteAddr())
 
 	start := time.Now()
 	var wg sync.WaitGroup
@@ -295,7 +281,7 @@ func TestSpeed(t *testing.T) {
 		nrecv := 0
 		i := 0
 		for {
-			n, err := stream.Read(buf)
+			n, err := MuxConn.Read(buf)
 			if err != nil {
 				t.Error(err)
 				break
@@ -307,13 +293,13 @@ func TestSpeed(t *testing.T) {
 				}
 			}
 		}
-		stream.Close()
+		MuxConn.Close()
 		t.Log("time for 16MB rtt", time.Since(start))
 		wg.Done()
 	}()
 	msg := make([]byte, 8192)
 	for i := 0; i < 2048; i++ {
-		stream.Write(msg)
+		MuxConn.Write(msg)
 	}
 	wg.Wait()
 	session.Close()

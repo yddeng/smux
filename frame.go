@@ -37,7 +37,7 @@ const muxConnWindowSize = 512 * 1024
 
 const (
 	pingInterval = time.Second * 10
-	pingTimeout  = time.Second * 60
+	pingTimeout  = pingInterval * 10
 )
 
 type header [headerSize]byte
