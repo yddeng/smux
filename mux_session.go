@@ -22,9 +22,7 @@ type MuxSession struct {
 	closeOnce   sync.Once
 	closeReason atomic.Value
 
-	chWrite chan *writeRequest
-
-	// 写缓冲区
+	chReqQueue    chan *writeRequest
 	buffer        []byte
 	br, bw        int
 	bufferLock    sync.Mutex
@@ -47,7 +45,7 @@ func NewMuxSession(conn net.Conn) *MuxSession {
 		chAccepts:     make(chan *MuxConn, 1024),
 		chClose:       make(chan struct{}),
 		closeOnce:     sync.Once{},
-		chWrite:       make(chan *writeRequest),
+		chReqQueue:    make(chan *writeRequest),
 		buffer:        make([]byte, muxConnWindowSize),
 		chBufferRead:  make(chan struct{}, 1),
 		chBufferWrite: make(chan struct{}, 1),
@@ -56,7 +54,7 @@ func NewMuxSession(conn net.Conn) *MuxSession {
 
 	go mux.readLoop()
 	go mux.writeLoop()
-	go mux.push()
+	go mux.writeR()
 	go mux.ping()
 	return mux
 }
@@ -245,12 +243,12 @@ type writeRequest struct {
 	done  chan struct{}
 }
 
-func (this *MuxSession) push() {
+func (this *MuxSession) writeR() {
 	for {
 		select {
 		case <-this.chClose:
 			return
-		case req := <-this.chWrite:
+		case req := <-this.chReqQueue:
 			length := headerSize + len(req.b)
 
 			this.bufferLock.Lock()
@@ -327,7 +325,7 @@ func (this *MuxSession) writeLoop() {
 //		select {
 //		case <-this.chClose:
 //			return
-//		case req := <-this.chWrite:
+//		case req := <-this.chReqQueue:
 //			if !atomic.CompareAndSwapInt32(&req.doing, 0, 1) {
 //				// 已经超时返回，不再执行
 //				return
@@ -393,7 +391,7 @@ func (this *MuxSession) writeData(cid uint16, b []byte, deadline <-chan time.Tim
 	select {
 	case <-this.chClose:
 		return 0, this.closeReason.Load().(error)
-	case this.chWrite <- req:
+	case this.chReqQueue <- req:
 	case <-deadline:
 		if atomic.CompareAndSwapInt32(&req.doing, 0, 1) {
 			return 0, ErrTimeout
@@ -424,7 +422,7 @@ func (this *MuxSession) writeHeader(cmd byte, cid uint16, length uint32) {
 
 	select {
 	case <-this.chClose:
-	case this.chWrite <- req:
+	case this.chReqQueue <- req:
 	}
 }
 
