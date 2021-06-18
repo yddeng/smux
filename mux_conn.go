@@ -13,7 +13,7 @@ import (
  只有在非堵塞模式下才有的返回错误
  读情况下，没有数据可读；写情况下，不能写且已发送为0
 */
-var ErrNonblock = errors.New("nonblock. ")
+var ErrNonblock = errors.New("nonblock none. ")
 
 type MuxConn struct {
 	ms     *MuxSession

@@ -1,18 +1,10 @@
 package smux
 
 import (
-	"encoding/binary"
-	"errors"
 	"io"
 	"math/rand"
 	"net"
 	"time"
-)
-
-var (
-	ErrTimeout    = errors.New("timeout. ")
-	ErrClosedPipe = errors.New("the stream has closed. ")
-	ErrBrokenPipe = errors.New("write on closed stream. ")
 )
 
 // 判断对端是否是多路复用
@@ -23,9 +15,8 @@ func IsSmux(conn net.Conn, timeout time.Duration) bool {
 	v11, v22 := verifyCode(v1, v2)
 
 	hdr := make([]byte, headerSize)
-	hdr[0] = cmdVRM
-	binary.LittleEndian.PutUint16(hdr[1:], v1)
-	binary.LittleEndian.PutUint32(hdr[3:], v2)
+
+	packHeader(hdr, cmdVRM, v1, v2)
 
 	conn.SetWriteDeadline(deadline)
 	if _, err := conn.Write(hdr); err != nil {
@@ -43,9 +34,7 @@ func IsSmux(conn net.Conn, timeout time.Duration) bool {
 	}
 	conn.SetReadDeadline(time.Time{})
 
-	cmd := hdr[0]
-	rv1 := binary.LittleEndian.Uint16(hdr[1:])
-	rv2 := binary.LittleEndian.Uint32(hdr[3:])
+	cmd, rv1, rv2 := unpackHeader(hdr)
 	if cmd != cmdVRM || rv1 != v11 || rv2 != v22 {
 		return false
 	}

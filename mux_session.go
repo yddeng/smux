@@ -1,7 +1,6 @@
 package smux
 
 import (
-	"encoding/binary"
 	"errors"
 	"net"
 	"sync"
@@ -25,6 +24,13 @@ type MuxSession struct {
 
 	chWrite chan *writeRequest
 
+	// 写缓冲区
+	buffer        []byte
+	br, bw        int
+	bufferLock    sync.Mutex
+	chBufferWrite chan struct{}
+	chBufferRead  chan struct{}
+
 	lastPingTime atomic.Value // time.Time
 
 	aioService       *AIOService // epoll
@@ -33,20 +39,24 @@ type MuxSession struct {
 
 func NewMuxSession(conn net.Conn) *MuxSession {
 	mux := &MuxSession{
-		conn:        conn,
-		idAlloc:     NewIDBitmap(),
-		connections: map[uint16]*MuxConn{},
-		connWaitFin: map[uint16]struct{}{},
-		connLock:    sync.Mutex{},
-		chAccepts:   make(chan *MuxConn, 1024),
-		chClose:     make(chan struct{}),
-		closeOnce:   sync.Once{},
-		chWrite:     make(chan *writeRequest),
+		conn:          conn,
+		idAlloc:       NewIDBitmap(),
+		connections:   map[uint16]*MuxConn{},
+		connWaitFin:   map[uint16]struct{}{},
+		connLock:      sync.Mutex{},
+		chAccepts:     make(chan *MuxConn, 1024),
+		chClose:       make(chan struct{}),
+		closeOnce:     sync.Once{},
+		chWrite:       make(chan *writeRequest),
+		buffer:        make([]byte, muxConnWindowSize),
+		chBufferRead:  make(chan struct{}, 1),
+		chBufferWrite: make(chan struct{}, 1),
 	}
 	mux.lastPingTime.Store(time.Now())
 
 	go mux.readLoop()
 	go mux.writeLoop()
+	go mux.push()
 	go mux.ping()
 	return mux
 }
@@ -152,9 +162,7 @@ func (this *MuxSession) readLoop() {
 			w += n
 		loop:
 			for w-r >= headerSize {
-				cmd := buffer[r]
-				cid := binary.LittleEndian.Uint16(buffer[r+1:])
-				length := binary.LittleEndian.Uint32(buffer[r+3:])
+				cmd, cid, length := unpackHeader(buffer[r : r+headerSize])
 				r += headerSize
 
 				switch cmd {
@@ -228,18 +236,55 @@ func (this *MuxSession) readLoop() {
 	}
 }
 
-type writeResult struct {
-	n   int
-	err error
-}
-
 type writeRequest struct {
 	cmd   byte
 	v1    uint16
 	v2    uint32
 	b     []byte
 	doing int32
-	done  chan *writeResult
+	done  chan struct{}
+}
+
+func (this *MuxSession) push() {
+	for {
+		select {
+		case <-this.chClose:
+			return
+		case req := <-this.chWrite:
+			length := headerSize + len(req.b)
+
+			this.bufferLock.Lock()
+			for this.bw+length > muxConnWindowSize {
+				this.bufferLock.Unlock()
+				// notify
+				notifyEvent(this.chBufferWrite)
+
+				select {
+				case <-this.chClose:
+					return
+				case <-this.chBufferRead:
+					this.bufferLock.Lock()
+				}
+			}
+
+			if !atomic.CompareAndSwapInt32(&req.doing, 0, 1) {
+				// 已经超时返回，不再执行
+				this.bufferLock.Unlock()
+				break
+			}
+			close(req.done)
+
+			packHeader(this.buffer[this.bw:], req.cmd, req.v1, req.v2)
+			if len(req.b) > 0 {
+				copy(this.buffer[this.bw+headerSize:], req.b)
+			}
+
+			this.bw += length
+			this.bufferLock.Unlock()
+
+			notifyEvent(this.chBufferWrite)
+		}
+	}
 }
 
 func (this *MuxSession) writeLoop() {
@@ -247,42 +292,74 @@ func (this *MuxSession) writeLoop() {
 		select {
 		case <-this.chClose:
 			return
-		case req := <-this.chWrite:
-			if !atomic.CompareAndSwapInt32(&req.doing, 0, 1) {
-				// 已经超时返回，不再执行
+		case <-this.chBufferWrite:
+			this.bufferLock.Lock()
+			if this.bw-this.br == 0 {
+				this.bufferLock.Unlock()
+				break
+			}
+
+			data := this.buffer[this.br:this.bw]
+			this.bufferLock.Unlock()
+
+			n, err := this.conn.Write(data)
+			if err != nil {
+				this.close(err)
 				return
 			}
 
-			// 本次数据必定发往对端（tcp无错）
-			/*
-				不将超时设置到conn上，可能情况:
-				header 写入完成，data 超时。导致对端拆包出错。
-			*/
-
-			data := make([]byte, headerSize+len(req.b))
-
-			data[0] = req.cmd
-			binary.LittleEndian.PutUint16(data[1:], req.v1)
-			binary.LittleEndian.PutUint32(data[3:], req.v2)
-
-			if len(req.b) > 0 {
-				copy(data[headerSize:], req.b)
+			this.bufferLock.Lock()
+			this.br += n
+			if this.bw > muxConnWindowSize/2 && this.br != 0 {
+				this.bw = copy(this.buffer, this.buffer[this.br:this.bw])
+				this.br = 0
 			}
+			this.bufferLock.Unlock()
+			notifyEvent(this.chBufferRead)
 
-			ret := new(writeResult)
-			ret.n, ret.err = this.conn.Write(data)
-			ret.n -= headerSize
-
-			req.done <- ret
-			close(req.done)
-
-			if ret.err != nil {
-				this.close(ret.err)
-				return
-			}
 		}
+
 	}
 }
+
+//func (this *MuxSession) writeLoop() {
+//	for {
+//		select {
+//		case <-this.chClose:
+//			return
+//		case req := <-this.chWrite:
+//			if !atomic.CompareAndSwapInt32(&req.doing, 0, 1) {
+//				// 已经超时返回，不再执行
+//				return
+//			}
+//
+//			// 本次数据必定发往对端（tcp无错）
+//			/*
+//				不将超时设置到conn上，可能情况:
+//				header 写入完成，data 超时。导致对端拆包出错。
+//			*/
+//
+//			data := make([]byte, headerSize+len(req.b))
+//
+//			packHeader(data, req.cmd, req.v1, req.v2)
+//			if len(req.b) > 0 {
+//				copy(data[headerSize:], req.b)
+//			}
+//
+//			ret := new(writeResult)
+//			ret.n, ret.err = this.conn.Write(data)
+//			ret.n -= headerSize
+//
+//			req.done <- ret
+//			close(req.done)
+//
+//			if ret.err != nil {
+//				this.close(ret.err)
+//				return
+//			}
+//		}
+//	}
+//}
 
 func (this *MuxSession) ping() {
 	timer := time.NewTimer(pingInterval)
@@ -310,7 +387,7 @@ func (this *MuxSession) ping() {
 func (this *MuxSession) writeData(cid uint16, b []byte, deadline <-chan time.Time) (n int, err error) {
 	req := &writeRequest{
 		cmd: cmdPSH, v1: cid, v2: uint32(len(b)),
-		b: b, done: make(chan *writeResult, 1),
+		b: b, done: make(chan struct{}),
 	}
 
 	select {
@@ -334,15 +411,15 @@ func (this *MuxSession) writeData(cid uint16, b []byte, deadline <-chan time.Tim
 		} else {
 			return len(b), ErrTimeout
 		}
-	case ret := <-req.done:
-		return ret.n, ret.err
+	case <-req.done:
+		return len(b), nil
 	}
 }
 
 func (this *MuxSession) writeHeader(cmd byte, cid uint16, length uint32) {
 	req := &writeRequest{
 		cmd: cmd, v1: cid, v2: length,
-		done: make(chan *writeResult, 1),
+		done: make(chan struct{}),
 	}
 
 	select {

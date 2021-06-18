@@ -1,5 +1,7 @@
 package smux
 
+import "sync"
+
 type Buffer struct {
 	r, w  int
 	buf   []byte
@@ -115,4 +117,21 @@ func (b *Buffer) Write(buf []byte) (n int, err error) {
 		b.empty = false
 	}
 	return
+}
+
+type sendBuffer struct {
+	r, w int
+	size int
+	buf  []byte
+	lock sync.Mutex
+}
+
+func newSendBuff(size int) *sendBuffer {
+	return &sendBuffer{
+		r:    0,
+		w:    0,
+		size: size,
+		buf:  make([]byte, size),
+		lock: sync.Mutex{},
+	}
 }

@@ -1,6 +1,8 @@
 package smux
 
 import (
+	"encoding/binary"
+	"errors"
 	"time"
 )
 
@@ -37,6 +39,25 @@ const (
 	pingInterval = time.Second * 10
 	pingTimeout  = pingInterval * 10
 )
+
+var (
+	ErrTimeout    = errors.New("timeout. ")
+	ErrClosedPipe = errors.New("the stream has closed. ")
+	ErrBrokenPipe = errors.New("write on closed stream. ")
+)
+
+func packHeader(buf []byte, cmd byte, v1 uint16, v2 uint32) {
+	buf[0] = cmd
+	binary.LittleEndian.PutUint16(buf[1:], v1)
+	binary.LittleEndian.PutUint32(buf[3:], v2)
+}
+
+func unpackHeader(data []byte) (cmd byte, v1 uint16, v2 uint32) {
+	cmd = data[0]
+	v1 = binary.LittleEndian.Uint16(data[1:])
+	v2 = binary.LittleEndian.Uint32(data[3:])
+	return
+}
 
 func notifyEvent(ch chan struct{}) {
 	select {
