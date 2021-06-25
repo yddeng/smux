@@ -55,7 +55,7 @@ func NewMuxSession(conn net.Conn) *MuxSession {
 	go mux.readLoop()
 	go mux.writeLoop()
 	go mux.writeR()
-	go mux.ping()
+	go mux.keepalive()
 	return mux
 }
 
@@ -359,7 +359,7 @@ func (this *MuxSession) writeLoop() {
 //	}
 //}
 
-func (this *MuxSession) ping() {
+func (this *MuxSession) keepalive() {
 	timer := time.NewTimer(pingInterval)
 	defer timer.Stop()
 	for {

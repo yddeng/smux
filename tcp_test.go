@@ -171,3 +171,20 @@ func TestTCPRead(t *testing.T) {
 
 	*/
 }
+
+func TestTCPNOTAppect(t *testing.T) {
+	addr := "127.0.0.1:0"
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		panic(err)
+	}
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		panic(err)
+	}
+
+	n, err := conn.Write(make([]byte, 1024))
+	t.Log(n, err)
+
+}
