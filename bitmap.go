@@ -30,7 +30,9 @@ func (this *idBitmap) Get() (uint16, error) {
 		if (this.bits[idx] & (1 << bit)) == 0 {
 			this.bits[idx] |= 1 << bit
 			this.length++
-			return this.next, nil
+			id := this.next
+			this.next++
+			return id, nil
 		}
 
 		if this.next == math.MaxUint16 {
