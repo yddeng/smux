@@ -156,9 +156,11 @@ func (this *MuxConn) waitRead() error {
 			return nil
 		}
 		return io.EOF
+	case <-this.chClose:
+		return ErrClosedPipe
 	case <-deadline:
 		return ErrTimeout
-	case <-this.chClose:
+	case <-this.ms.chClose:
 		return this.ms.closeReason.Load().(error)
 	case <-this.chNonblockEvent:
 		return nil
@@ -229,6 +231,8 @@ func (this *MuxConn) Write(b []byte) (n int, err error) {
 				return n, ErrTimeout
 			case <-this.chClose:
 				return 0, ErrClosedPipe
+			case <-this.ms.chClose:
+				return 0, this.ms.closeReason.Load().(error)
 			case <-this.chNonblockEvent:
 			case <-nonblockC:
 				if n == 0 {
