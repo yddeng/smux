@@ -1,7 +1,12 @@
 package smux
 
 import (
+	"errors"
 	"sync"
+)
+
+var (
+	ErrServiceClosed = errors.New("aioService is closed. ")
 )
 
 type Event byte
@@ -65,9 +70,9 @@ func (this *AIOService) trigger(fd uint16) {
 	}
 }
 
-func (this *AIOService) Watch(fd uint16, callback func(event Event)) {
+func (this *AIOService) Watch(fd uint16, callback func(event Event)) error {
 	if this.isClosed() {
-		return
+		return ErrServiceClosed
 	}
 
 	this.fdLock.Lock()
@@ -78,6 +83,7 @@ func (this *AIOService) Watch(fd uint16, callback func(event Event)) {
 	} else {
 		this.fdLock.Unlock()
 	}
+	return nil
 }
 
 func (this *AIOService) Unwatch(fd uint16) {
@@ -92,6 +98,14 @@ func (this *AIOService) Close() {
 		this.mux.aioServiceLocker.Lock()
 		this.mux.aioService = nil
 		this.mux.aioServiceLocker.Unlock()
+		this.mux = nil
+	})
+}
+
+func (this *AIOService) close() {
+	this.dieOnce.Do(func() {
+		close(this.die)
+		this.mux.aioService = nil
 		this.mux = nil
 	})
 }
@@ -116,6 +130,11 @@ func OpenAIOService(mux *MuxSession, worker int) *AIOService {
 		taskQueue:   make(chan *task, 1024),
 	}
 	mux.aioService = s
+
+	if mux.IsClosed() {
+		s.close()
+		return s
+	}
 
 	if worker <= 0 {
 		worker = 1

@@ -144,6 +144,12 @@ func (this *MuxSession) close(err error) {
 		}
 		this.connections = map[uint16]*MuxConn{}
 		this.connLock.Unlock()
+
+		this.aioServiceLocker.Lock()
+		if this.aioService != nil {
+			this.aioService.close()
+		}
+		this.aioServiceLocker.Unlock()
 	})
 }
 
